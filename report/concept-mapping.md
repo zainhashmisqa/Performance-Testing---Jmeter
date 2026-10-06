@@ -23,7 +23,7 @@
 | Static validation | `validate_repo.py`: 0 errors, 1 warning (pyyaml not installed) |
 | Secret scan | `ci/secret_scan.py`: **PASSED** — 0 committed secrets |
 | Properties | 49 distinct `__P()` references — zero hardcoded operational values |
-| JMX quality | 1,368 lines, 54 assertions, 18 HTTP samplers, 16 JSON extractors, 10 Groovy scripts |
+| JMX quality | 1,368 lines, 54 assertions, 18 HTTP samplers, 16 JSON extractors, 12 Groovy scripts |
 
 ### What this submission proves without the live target
 
@@ -49,8 +49,10 @@ Load activity/
 ├── data/
 │   └── logins.csv                         # 120 synthetic test accounts
 ├── scripts/
-│   ├── groovy/                            # 10 external Groovy scripts
-│   │   ├── self_heal_token.groovy         # Concept 17 — alias map + heuristic
+│   ├── groovy/                            # 12 external Groovy scripts
+│   │   ├── self_heal_token.groovy         # Concept 17 — 4-layer healing agent
+│   │   ├── correlation_guardian.groovy   # Concept 17 — multi-field correlation healer
+│   │   ├── self_heal_stats.groovy        # Concept 17 — teardown statistics reporter
 │   │   ├── signature_preprocessor.groovy  # Concept 6 — HMAC-SHA256
 │   │   ├── retry_postprocessor.groovy     # Concept 15 — retry with backoff
 │   │   ├── retry_reset_preprocessor.groovy
@@ -179,7 +181,7 @@ external by nature (distributed topology and CI pipeline).
 |---|---|---|---|---|
 | 7 | Distributed Load | `run/distributed.ps1` — controller + workers, `-G` property forwarding (not `-J`), per-worker CSV partitioning, post-run contribution analysis | `run/distributed.ps1` + `run/worker-start.ps1` | 5,101 samples across 51 VUs on `azm_distributed` (verified in InfluxDB) |
 | 16 | CI/CD Integration | 3 GitHub Actions workflows + GitHub Pages dashboard: `perf.yml` (4-job pipeline with SLA gate + regression detection + live Pages deploy), `validate.yml` (static validation), `proof-tests.yml` (evidence collector) | `.github/workflows/` | Concurrency control, JMeter caching, secret-only credentials, rich step summaries, live report at Pages URL |
-| 17 | AI Self-Healing | Groovy PostProcessor: deterministic alias map (11 known token field names) + heuristic fallback + optional LLM Layer 2 | setUp > `CONCEPT 17` | `scripts/groovy/self_heal_token.groovy`; provable with `run/proof-self-heal.ps1` |
+| 17 | AI Self-Healing | 4-layer agent: alias map (16 names) + JWT detection + heuristic pattern + LLM fallback; circuit breaker, correlation guardian for all 7 variables, response fingerprinting, statistics reporter | setUp > `CONCEPT 17` | `scripts/groovy/self_heal_token.groovy` + `correlation_guardian.groovy` + `self_heal_stats.groovy`; provable with `run/proof-self-heal.ps1` |
 
 ---
 
@@ -327,24 +329,52 @@ Controller (this machine)                Workers (remote JVMs)
 
 ## 8. Self-healing detail (Concept 17)
 
-### Mechanism — stated honestly
+### Multi-Strategy Self-Healing Agent
 
-- **Layer 1 (deterministic — this is the graded mechanism):** When the JSON Extractor
-  returns `NOT_FOUND`, a Groovy PostProcessor (`scripts/groovy/self_heal_token.groovy`)
-  flattens the response (top level + nested wrappers to depth 3) and searches a known
-  alias list:
+The self-healing system is a 4-layer agent with circuit breaker, response
+fingerprinting, and multi-field correlation guardian.
 
-  `authToken`, `accessToken`, `access_token`, `sessionToken`, `session_token`,
-  `token`, `jwt`, `id_token`, `idToken`, `bearerToken`, `api_token`
+**Layer 1 — Deterministic alias map (primary mechanism):**
+When the JSON Extractor returns `NOT_FOUND`, the agent
+(`scripts/groovy/self_heal_token.groovy`) flattens the response to depth 5
+(handles nested wrappers: `{data:{token:..}}`, `{result:{auth:{..}}}`) and
+searches 16 known aliases:
 
-  If no alias matches, a heuristic accepts any key containing *token*/*auth*/*jwt*
-  whose value is >= 16 characters. On success it rebinds `${authToken}` and logs the
-  event to `results/self-heal.log`.
+`authToken`, `accessToken`, `access_token`, `sessionToken`, `session_token`,
+`token`, `jwt`, `id_token`, `idToken`, `bearerToken`, `bearer_token`,
+`api_token`, `apiToken`, `auth_token`, `refresh_token`, `x-auth-token`
 
-- **Layer 2 (experimental, opt-in, not relied upon):** If Layer 1 finds nothing and
-  `-Jllm_enabled=true` with an approved endpoint is supplied, an LLM is asked which
-  key holds the token. It is a fallback only — never on the hot path. No key or
-  endpoint is stored in the `.jmx`.
+**Layer 2 — JWT structure detection:**
+If no alias matches, scans all values for the JWT format
+(`header.payload.signature` — three base64url segments separated by dots).
+Catches tokens under completely unexpected field names.
+
+**Layer 3 — Heuristic pattern matching:**
+Accepts any key containing token/auth/jwt/bearer/session/credential keywords
+with a value >= 16 characters. Falls back further to any long opaque string
+(32+ alphanumeric characters) excluding URLs, paths, and emails.
+
+**Layer 4 — LLM fallback (opt-in):**
+Only runs when `-Jllm_enabled=true` with an endpoint supplied at runtime.
+No key or endpoint stored in the `.jmx`.
+
+### Agent features
+
+| Feature | Implementation |
+|---|---|
+| **Circuit breaker** | After 3 consecutive heals on the same alias, caches the field mapping in JMeter properties. Subsequent iterations skip the full scan entirely. |
+| **Correlation guardian** | `scripts/groovy/correlation_guardian.groovy` — monitors ALL 7 extracted variables (`userId`, `courseSlug`, `enrollmentId`, `certId`, `categorySlug`, `catalogCourseId`, `orderId`), not just `authToken`. Each has its own alias registry. |
+| **Learning cache** | The guardian records which field names actually work per sampler. On subsequent iterations it uses the known mapping directly, re-scanning only if the cached mapping breaks. |
+| **Response fingerprinting** | Logs structural changes in the API response between requests — detects when fields are added, removed, or renamed mid-run. |
+| **Statistics reporter** | `scripts/groovy/self_heal_stats.groovy` runs in tearDown, aggregates per-layer hit counts, and writes `results/self-heal-summary.json`. |
+
+### Evidence files
+
+| File | Content |
+|---|---|
+| `results/self-heal-local.log` | Per-event healing log with timestamp, layer, field, sampler |
+| `results/correlation-guardian-local.jsonl` | Structured JSON log of all correlation heals |
+| `results/self-heal-summary.json` | Aggregated statistics: total heals, per-layer counts, circuit breaker state |
 
 ### Proof run
 
@@ -354,9 +384,9 @@ Controller (this machine)                Workers (remote JVMs)
 
 This points the JSON Extractor at `$.sessionToken_renamed_by_api` — a path that
 does not exist — simulating the API renaming its token field. Expected result:
-extraction fails -> self-heal recovers the token via alias scan -> run continues green.
-
-Evidence: `results/self-heal.log`
+extraction fails -> self-heal agent recovers the token -> circuit breaker caches
+the mapping -> correlation guardian monitors all downstream variables -> statistics
+reporter summarizes at teardown -> run continues green.
 
 ---
 

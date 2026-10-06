@@ -46,7 +46,7 @@ Each run creates `results/<level>-<timestamp>/` with the `.jtl`, HTML report, JM
 | Assertions | **54** (17 Response + 35 JSONPath + 1 Duration + 1 JSR223) |
 | HTTP Samplers | 18 |
 | JSON Extractors | 16 (correlation chain) |
-| External Groovy Scripts | 10 (all `cacheKey=true`) |
+| External Groovy Scripts | 12 (all `cacheKey=true`) |
 | Thread Groups | 4 (setUp + Main + Monitor + tearDown) |
 | CI/CD Workflows | 3 (validate + perf pipeline + proof-tests) |
 | Grafana Dashboard | Custom k6-style, 7 sections, auto-provisioned |
@@ -101,7 +101,9 @@ Custom k6-inspired dashboard with 7 sections, auto-provisioned via Docker Compos
 │   └── logins.csv                     # 120 synthetic test accounts
 ├── scripts/
 │   ├── groovy/                        # 10 external Groovy scripts
-│   │   ├── self_heal_token.groovy     # Concept 17 — alias map + heuristic
+│   │   ├── self_heal_token.groovy     # Concept 17 — 4-layer healing agent
+│   │   ├── correlation_guardian.groovy # Concept 17 — multi-field correlation healer
+│   │   ├── self_heal_stats.groovy    # Concept 17 — teardown statistics
 │   │   ├── signature_preprocessor.groovy  # Concept 6 — HMAC-SHA256
 │   │   ├── retry_postprocessor.groovy # Concept 15 — retry with backoff
 │   │   ├── jdbc_assertion.groovy      # Concept 11 — DB row validation
@@ -160,7 +162,7 @@ Custom k6-inspired dashboard with 7 sections, auto-provisioned via Docker Compos
 | 8 | Monitoring & Reporting | A | InfluxDB + Grafana auto-provisioned + server-side metrics polling |
 | 7 | Distributed Load | B | `-G` forwarding (not `-J`), CSV partitioning, post-run worker analysis |
 | 16 | CI/CD Integration | B | 3 workflows: validation gate + perf pipeline + evidence collector |
-| 17 | AI Self-Healing | B | Deterministic alias map (11 token names) + heuristic + optional LLM Layer 2 |
+| 17 | AI Self-Healing | B | 4-layer agent: alias map (16 names) + JWT detection + heuristic + LLM; circuit breaker, correlation guardian, response fingerprinting |
 
 ---
 
