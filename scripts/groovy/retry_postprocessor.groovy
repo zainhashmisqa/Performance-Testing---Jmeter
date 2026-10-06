@@ -1,5 +1,5 @@
 /* ===========================================================================
- * CONCEPT 15 — Error Handling & Retry  (Tier B, part 2 of 2)
+ * CONCEPT 15 — Error Handling & Retry  (Tier A, part 2 of 2)
  * ---------------------------------------------------------------------------
  * Placement: JSR223 PostProcessor INSIDE the While Controller, directly after
  *            the Certificates sampler (S07).

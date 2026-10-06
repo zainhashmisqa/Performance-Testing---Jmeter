@@ -24,7 +24,7 @@ cd monitoring; docker compose up -d; cd ..
 .\run\peak.ps1       # 40 VUs  / 90s ramp  / 15 min
 .\run\spike.ps1      # 50 VUs  / 120s ramp / 15 min
 
-# 4. Tier C proofs
+# 4. Tier B proofs
 .\run\proof-self-heal.ps1    # Concept 17 — token field rename recovery
 .\run\proof-jdbc.ps1         # Concept 11 — H2 embedded DB validation
 
@@ -41,7 +41,7 @@ Each run creates `results/<level>-<timestamp>/` with the `.jtl`, HTML report, JM
 
 | Metric | Value |
 |---|---|
-| Concepts implemented | **17 / 17** (Tier A: 7, Tier B: 7, Tier C: 3) |
+| Concepts implemented | **17 / 17** (Tier A: 14, Tier B: 3) |
 | Externalized properties | **49** via `${__P(name,default)}` — zero hardcoded values |
 | Assertions | **54** (17 Response + 35 JSONPath + 1 Duration + 1 JSR223) |
 | HTTP Samplers | 18 |
@@ -151,16 +151,16 @@ Custom k6-inspired dashboard with 7 sections, auto-provisioned via Docker Compos
 | 10 | Dynamic Auth Headers | A | HTTP Header Manager -> `Authorization: Bearer ${authToken}` |
 | 13 | Custom Timers | A | Gaussian (2000 +/- 1000ms) + Synchronizing Timer + Constant Timer |
 | 9 | Order Controllers | A | Random Controller (browse) + Interleave Controller (cart) |
-| 1 | Weighted Mix | B | 3x Throughput Controller: 50/30/20 (property-driven) |
-| 14 | Config Management | B | 49 `${__P()}` properties + env overlays — zero hardcoded values |
-| 6 | JSR223 Scripting | B | HMAC-SHA256 signature + dynamic payload + nonce (`cacheKey=true`) |
-| 15 | Error Handling & Retry | B | While Controller + Groovy PostProcessor, max 3 attempts, linear backoff |
-| 11 | JDBC Validation | B | JDBC Connection Config + Request + JSR223 assertion (gated by `jdbc_enabled`) |
-| 5 | Profiling & Analysis | B | Transaction Controllers per step -> per-label p90/p95/p99 |
-| 8 | Monitoring & Reporting | B | InfluxDB + Grafana auto-provisioned + server-side metrics polling |
-| 7 | Distributed Load | C | `-G` forwarding (not `-J`), CSV partitioning, post-run worker analysis |
-| 16 | CI/CD Integration | C | 3 workflows: validation gate + perf pipeline + evidence collector |
-| 17 | AI Self-Healing | C | Deterministic alias map (11 token names) + heuristic + optional LLM Layer 2 |
+| 1 | Weighted Mix | A | 3x Throughput Controller: 50/30/20 (property-driven) |
+| 14 | Config Management | A | 49 `${__P()}` properties + env overlays — zero hardcoded values |
+| 6 | JSR223 Scripting | A | HMAC-SHA256 signature + dynamic payload + nonce (`cacheKey=true`) |
+| 15 | Error Handling & Retry | A | While Controller + Groovy PostProcessor, max 3 attempts, linear backoff |
+| 11 | JDBC Validation | A | JDBC Connection Config + Request + JSR223 assertion (gated by `jdbc_enabled`) |
+| 5 | Profiling & Analysis | A | Transaction Controllers per step -> per-label p90/p95/p99 |
+| 8 | Monitoring & Reporting | A | InfluxDB + Grafana auto-provisioned + server-side metrics polling |
+| 7 | Distributed Load | B | `-G` forwarding (not `-J`), CSV partitioning, post-run worker analysis |
+| 16 | CI/CD Integration | B | 3 workflows: validation gate + perf pipeline + evidence collector |
+| 17 | AI Self-Healing | B | Deterministic alias map (11 token names) + heuristic + optional LLM Layer 2 |
 
 ---
 

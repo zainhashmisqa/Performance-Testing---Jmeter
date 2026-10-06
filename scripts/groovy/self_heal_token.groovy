@@ -1,5 +1,5 @@
 /* ===========================================================================
- * CONCEPT 17 — AI Self-Healing  (Tier C, bonus)
+ * CONCEPT 17 — AI Self-Healing  (Tier B)
  * ---------------------------------------------------------------------------
  * Placement: JSR223 PostProcessor, immediately AFTER the token JSON Extractor
  *            in the setUp Thread Group.

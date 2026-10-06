@@ -1,5 +1,5 @@
 /* ===========================================================================
- * CONCEPT 15 — Error Handling & Retry  (Tier B, part 1 of 2)
+ * CONCEPT 15 — Error Handling & Retry  (Tier A, part 1 of 2)
  * ---------------------------------------------------------------------------
  * Placement: JSR223 PreProcessor on the "Reset retry state" sampler, placed
  *            BEFORE the While Controller on every iteration.

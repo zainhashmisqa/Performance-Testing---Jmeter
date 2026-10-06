@@ -1,4 +1,4 @@
-# CONCEPT 16 — CI/CD Integration (Tier C)
+# CONCEPT 16 — CI/CD Integration (Tier B)
 # Non-GUI JMeter run in a pipeline, HTML report published as a build artifact.
 # All environment/credential values come from GitHub Secrets — never the repo.
 #

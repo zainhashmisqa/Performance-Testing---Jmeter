@@ -1,5 +1,5 @@
 /* ===========================================================================
- * CONCEPT 11 — JDBC Validation  (Tier B)
+ * CONCEPT 11 — JDBC Validation  (Tier A)
  * ---------------------------------------------------------------------------
  * Placement: JSR223 Assertion on the "JDBC verify enrollment row" request,
  *            which sits inside a While Controller so the query can be re-issued.

@@ -18,9 +18,8 @@
 | Load levels defined | Smoke (1 VU), Baseline (30 VU), Peak (40 VU), Max (50 VU), Spike (30 VU burst) |
 | SLA thresholds | Baseline: p95 ≤ 2s, err ≤ 1% · Peak: p95 ≤ 3s, err < 2% · Spike: p95 ≤ 4s, err < 5% |
 | Graded results | **PENDING** — awaiting authorized load window against live target |
-| Tier A (7 concepts) | 7/7 implemented — structurally verified via `validate_repo.py` (0 errors) |
-| Tier B (7 concepts) | 7/7 implemented — JDBC gated behind `jdbc_enabled` (H2 proof in CI) |
-| Tier C (3 concepts) | 3/3 delivered — Distributed (5,101 samples proven), CI/CD (3 workflows), Self-healing (Layer 1 deterministic) |
+| Tier A (14 concepts) | 14/14 implemented — structurally verified via `validate_repo.py` (0 errors) |
+| Tier B (3 concepts) | 3/3 delivered — Distributed (5,101 samples proven), CI/CD (3 workflows + Pages dashboard), Self-healing (Layer 1 deterministic) |
 | Static validation | `validate_repo.py`: 0 errors, 1 warning (pyyaml not installed) |
 | Secret scan | `ci/secret_scan.py`: **PASSED** — 0 committed secrets |
 | Properties | 49 distinct `__P()` references — zero hardcoded operational values |
@@ -155,7 +154,7 @@ verifies every label and pairing automatically.
 All 17 are implemented. 15 live inside the `.jmx`; Concepts 7 and 16 are
 external by nature (distributed topology and CI pipeline).
 
-### Tier A — Core (7 concepts)
+### Tier A — Core (14 concepts)
 
 | # | Concept | JMeter Element | Location in .jmx | Evidence |
 |---|---|---|---|---|
@@ -166,11 +165,6 @@ external by nature (distributed topology and CI pipeline).
 | 10 | Dynamic Auth Headers | HTTP Header Manager -> `Authorization: Bearer ${authToken}` | Test Plan > `CONCEPT 10 — HTTP Header Manager` | Zero literal tokens in the plan |
 | 13 | Custom Timers | Gaussian Random Timer (2000 +/- 1000 ms); Synchronizing Timer for spike burst; Constant Timer | One per TX branch; Main TG > SyncTimer | SyncTimer is no-op by default (`sync_group_size=1`) |
 | 9 | Order Controllers | Random Controller (browse path), Interleave Controller (cart entry) | TX-01 Browse; TX-02 Explore | Non-sequential VU traversal |
-
-### Tier B — Advanced (7 concepts)
-
-| # | Concept | JMeter Element | Location in .jmx | Evidence |
-|---|---|---|---|---|
 | 1 | Weighted Mix | 3 x Throughput Controller, Percent Executions: `${__P(pct_browse,50)}` / `${__P(pct_cart,30)}` / `${__P(pct_checkout,20)}` | Main TG, three branches | Measured: exactly 50.0/30.0/20.0 distribution |
 | 14 | Config Management | Every value via `${__P(name,default)}` — **49 distinct properties** | Entire plan | `config/user.properties` + env overlays; switch environment with flags only |
 | 6 | JSR223 Scripting | Groovy PreProcessor: HMAC-SHA256 signature + dynamic payload + nonce, `cacheKey=true` | TX-03 > `CONCEPT 6` | `scripts/groovy/signature_preprocessor.groovy` |
@@ -179,12 +173,12 @@ external by nature (distributed topology and CI pipeline).
 | 5 | Profiling & Analysis | Transaction Controllers per step -> per-label p90/p95/p99 in HTML report | TX-01 / TX-02 / TX-03 | HTML Statistics table names each transaction separately |
 | 8 | Monitoring & Reporting | Backend Listener -> InfluxDB 1.8 -> custom k6-style Grafana dashboard (auto-provisioned) + dedicated monitor thread group polling server metrics | Test Plan > `CONCEPT 8` | `monitoring/` stack with 7-section dashboard |
 
-### Tier C — Differentiator (3 concepts)
+### Tier B — Advanced (3 concepts)
 
 | # | Concept | Implementation | Location | Evidence |
 |---|---|---|---|---|
 | 7 | Distributed Load | `run/distributed.ps1` — controller + workers, `-G` property forwarding (not `-J`), per-worker CSV partitioning, post-run contribution analysis | `run/distributed.ps1` + `run/worker-start.ps1` | 5,101 samples across 51 VUs on `azm_distributed` (verified in InfluxDB) |
-| 16 | CI/CD Integration | 3 GitHub Actions workflows: `perf.yml` (3-job pipeline with SLA gate + regression detection), `validate.yml` (static validation), `proof-tests.yml` (evidence collector) | `.github/workflows/` | Concurrency control, JMeter caching, secret-only credentials, rich step summaries |
+| 16 | CI/CD Integration | 3 GitHub Actions workflows + GitHub Pages dashboard: `perf.yml` (4-job pipeline with SLA gate + regression detection + live Pages deploy), `validate.yml` (static validation), `proof-tests.yml` (evidence collector) | `.github/workflows/` | Concurrency control, JMeter caching, secret-only credentials, rich step summaries, live report at Pages URL |
 | 17 | AI Self-Healing | Groovy PostProcessor: deterministic alias map (11 known token field names) + heuristic fallback + optional LLM Layer 2 | setUp > `CONCEPT 17` | `scripts/groovy/self_heal_token.groovy`; provable with `run/proof-self-heal.ps1` |
 
 ---
@@ -595,7 +589,7 @@ docker compose up -d
 .\run\peak.ps1
 .\run\spike.ps1
 
-# 4. Tier C proofs
+# 4. Tier B proofs
 .\run\proof-self-heal.ps1           # Concept 17 evidence
 .\run\proof-jdbc.ps1                # Concept 11 evidence (H2 embedded)
 
@@ -632,5 +626,5 @@ the generated HTML report, the JMeter log, and the SLA verdict.
 | 12 | Get team lead signature | ⬜ Pending | Section header: "Reviewed by" |
 | 13 | Tick remaining security checkboxes | ⬜ Pending | DB synthetic data confirmation + load authorization |
 
-**Minimum for submission:** Items 1-7 and 12. Items 8-9 are Tier C bonus evidence.
+**Minimum for submission:** Items 1-7 and 12. Items 8-9 are Tier B bonus evidence.
 Item 10 proves CI/CD works on GitHub (currently validated locally only).

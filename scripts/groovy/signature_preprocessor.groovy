@@ -1,5 +1,5 @@
 /* ===========================================================================
- * CONCEPT 6 — JSR223 Scripting  (Tier B)
+ * CONCEPT 6 — JSR223 Scripting  (Tier A)
  * ---------------------------------------------------------------------------
  * Placement: JSR223 PreProcessor on the Certificates sampler (S07).
  *
