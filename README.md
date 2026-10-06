@@ -119,16 +119,53 @@ Results go to `results/<level>-<timestamp>/` with `.jtl`, HTML report, and SLA v
 
 ---
 
-## Monitoring Stack — InfluxDB + Grafana
+## Virtualization — Docker Containers
 
-The monitoring stack runs via Docker Compose (`monitoring/docker-compose.yml`):
+The entire monitoring infrastructure runs as Docker containers via Docker Compose — no manual installation of InfluxDB or Grafana needed. One command brings everything up, fully configured and ready to receive data.
 
-- **InfluxDB 1.8** — time-series database receiving live JMeter metrics via Backend Listener
-- **Grafana 10.4.2** — auto-provisioned dashboard, no manual import needed
+**File:** `monitoring/docker-compose.yml`
+
+| Container | Image | Port | Role |
+|---|---|---|---|
+| `azm-influxdb` | `influxdb:1.8` | 8086 | Time-series database — stores all JMeter metrics (response times, throughput, errors, active threads) |
+| `azm-grafana` | `grafana/grafana:10.4.2` | 3000 | Dashboard UI — auto-provisioned with datasource + 38-panel dashboard, no manual setup |
+
+**Why Docker:**
+- Reproducible environment — same stack on every machine, no "works on my laptop" issues
+- Auto-provisioning — Grafana datasource (`provisioning/datasources/influxdb.yml`) and dashboard (`provisioning/dashboards/azm-sba-perf.json`) are volume-mounted and loaded on first boot
+- Persistent volumes — `influx-data` and `grafana-data` survive container restarts, test data is retained across runs
+- Clean teardown — `docker compose down -v` removes everything cleanly
 
 ```powershell
+# Start containers
 cd monitoring; docker compose up -d; cd ..
+
 # Grafana: http://localhost:3000 (admin / admin)
+# InfluxDB: http://localhost:8086 (database: jmeter)
+
+# Stop and remove
+cd monitoring; docker compose down; cd ..
+
+# Full cleanup including data volumes
+cd monitoring; docker compose down -v; cd ..
+```
+
+### Data Flow
+
+```
+JMeter (Backend Listener)
+    │  HTTP POST every 15s (InfluxDB line protocol)
+    ▼
+azm-influxdb container (port 8086)
+    │  database: jmeter, measurement: jmeter
+    │  fields: hit, avg, min, max, pct90, pct95, pct99,
+    │          countError, maxAT, meanAT, minAT,
+    │          sentBytes, receivedBytes
+    ▼
+azm-grafana container (port 3000)
+    │  InfluxQL queries, auto-refresh 5s
+    ▼
+38-panel dashboard (7 sections)
 ```
 
 ### Dashboard — 38 Panels, 7 Sections
@@ -159,17 +196,63 @@ The custom dashboard (`monitoring/provisioning/dashboards/azm-sba-perf.json`) pr
   <img src="docs/screenshots/grafana-distributed.png" width="800" alt="Distributed Load Testing section"/>
 </p>
 
-### InfluxDB Data Flow
+---
+
+## Distributed Load Testing
+
+Distributed testing splits the load across multiple machines — the controller orchestrates and workers generate the actual traffic. Total load = threads × workers.
+
+**Architecture:**
 
 ```
-JMeter Backend Listener
-    ↓  (HTTP POST every 15s)
-InfluxDB 1.8 (database: jmeter, measurement: jmeter)
-    ↓  (InfluxQL queries)
-Grafana Dashboard (38 panels, auto-refresh 5s)
+                    ┌─────────────────────┐
+                    │     Controller      │
+                    │  (this machine)     │
+                    │  orchestrates only  │
+                    │  NO load generation │
+                    └──────┬──────┬───────┘
+                      -G   │      │  -G
+                  props    │      │  props
+                    ┌──────▼──┐ ┌─▼───────┐
+                    │ Worker 1│ │ Worker 2 │
+                    │ 50 VUs  │ │ 50 VUs   │
+                    │ CSV pt.1│ │ CSV pt.2 │
+                    └─────────┘ └──────────┘
+                         = 100 VUs total
 ```
 
-Metrics stored in InfluxDB: `hit` (request count), `avg`/`min`/`max`/`pct90`/`pct95`/`pct99` (response times), `countError` (errors), `maxAT`/`meanAT`/`minAT` (active threads), `sentBytes`/`receivedBytes` (data transfer).
+**Key implementation details:**
+
+| Feature | Why it matters |
+|---|---|
+| `-G` property forwarding | `-J` only sets properties on the controller JVM — workers never see them. `-G` sends properties to every remote worker. Without this, workers silently use defaults |
+| CSV partitioning | Each worker opens `logins.csv` at row 1 independently. `scripts/partition_csv.py` splits the CSV so each worker gets its own slice — no duplicate logins |
+| Fixed RMI ports | JMeter uses dynamic ephemeral ports by default, which breaks firewalls. `config/rmi-nossl.properties` pins both `server_port` and `server.rmi.localport` |
+| NTP clock check | Merged JTL timestamps must be comparable across machines. The controller script warns if the Windows Time service isn't running |
+| Controller doesn't load | The controller only aggregates results. Running it as a worker simultaneously makes it the bottleneck |
+| Post-run worker analysis | After the run, per-worker sample counts and error rates are printed — proves all workers participated and load was evenly distributed |
+
+**Scripts:**
+
+| File | Role |
+|---|---|
+| `run/distributed.ps1` | Controller launcher — validates workers, forwards 30+ properties via `-G`, merges results |
+| `run/worker-start.ps1` | Worker launcher — sets hostname, RMI ports, loads its CSV partition |
+| `scripts/partition_csv.py` | Splits `data/logins.csv` into per-worker slices |
+
+**Usage:**
+
+```powershell
+# 1. Partition CSV for workers
+python scripts\partition_csv.py --workers 2
+
+# 2. On each worker machine
+.\run\worker-start.ps1 -WorkerIndex 1 -HostIp 10.0.0.11
+
+# 3. On controller
+.\run\distributed.ps1 -Workers 10.0.0.11,10.0.0.12 -Threads 100
+# Result: 100 threads × 2 workers = 200 VUs total
+```
 
 ---
 
