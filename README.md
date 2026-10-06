@@ -95,30 +95,6 @@ Results go to `results/<level>-<timestamp>/` with `.jtl`, HTML report, and SLA v
 
 ---
 
-## The 17 Concepts
-
-| # | Concept | Description |
-|---|---|---|
-| 1 | Weighted Mix | Three Throughput Controllers split traffic 50% browse / 30% cart / 20% checkout — percentages driven by `${__P()}` properties so the ratio changes without editing the script |
-| 2 | Correlation | 16 JSON Extractors capture dynamic values (`authToken`, `userId`, `courseSlug`, `enrollmentId`, `certId`, `orderId`, etc.) from one response and feed them into the next request |
-| 3 | Parameterization | CSV Data Set Config loads 120 synthetic test accounts from `data/logins.csv` with `shareMode=All` so each virtual user gets a unique login |
-| 4 | Request Chaining | 16 correlated variables flow across 18 HTTP samplers — login token used in headers, course slug in URLs, order ID in checkout, enrollment ID in verification |
-| 5 | Profiling & Analysis | Transaction Controllers wrap each business step so the HTML report breaks down p90/p95/p99 per transaction — identifies which step is the bottleneck |
-| 6 | JSR223 Scripting | Groovy PreProcessor computes HMAC-SHA256 signature over a canonical request fingerprint (method + path + userId + nonce + timestamp) for every checkout request |
-| 7 | Distributed Load | Controller + worker architecture using `-G` property forwarding (not `-J`), per-worker CSV partitioning, fixed RMI ports, NTP sync check, and post-run worker contribution analysis |
-| 8 | Monitoring & Reporting | Backend Listener streams live metrics to InfluxDB → Grafana dashboard with 38 panels across 7 sections (see dashboard details below) + server-side metric polling |
-| 9 | Order Controllers | Random Controller randomizes browse path selection, Interleave Controller alternates cart entries — prevents all virtual users from hitting the same endpoint in lockstep |
-| 10 | Dynamic Auth Headers | HTTP Header Manager injects `Authorization: Bearer ${authToken}` into every request — token extracted once during setUp and shared via inter-thread property |
-| 11 | JDBC Validation | After checkout, a JDBC Request queries the enrollment table to confirm the row was actually persisted — handles async writes with configurable retry (up to `db_max_tries`) |
-| 12 | Assertions | 54 assertions validate response body content (not just HTTP 200): JSONPath checks on `$.status`, Response assertions on business fields, Duration assertion on checkout SLA, JSR223 assertion on DB result |
-| 13 | Custom Timers | Gaussian Random Timer (2000ms ± 1000ms) simulates human think time, Synchronizing Timer creates coordinated spike bursts, Constant Timer controls pacing |
-| 14 | Config Management | Every operational value externalized via `${__P(name,default)}` — 49 distinct properties across target URL, load profile, thresholds, DB config, monitoring. Environment switching via `-q config/staging.properties` overlays |
-| 15 | Error Handling & Retry | While Controller + Groovy PostProcessor retries failed requests up to 3 times with linear backoff (500ms, 1000ms, 1500ms) — checks body content, not just status code. Provable with `-Jforce_fail=true` |
-| 16 | CI/CD Integration | 3 GitHub Actions workflows (all `workflow_dispatch` only): validation gate, full performance pipeline with SLA gate + regression detection, and evidence collector. Publishes results to GitHub Pages |
-| 17 | AI Self-Healing | 4-layer agent: deterministic alias map (16 field names) → JWT structure detection → heuristic pattern matching → optional LLM fallback. Includes circuit breaker, correlation guardian for all 7 extracted variables, and response fingerprinting |
-
----
-
 ## Virtualization — Docker Containers
 
 The entire monitoring infrastructure runs as Docker containers via Docker Compose — no manual installation of InfluxDB or Grafana needed. One command brings everything up, fully configured and ready to receive data.
