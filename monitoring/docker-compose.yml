@@ -1,0 +1,44 @@
+# CONCEPT 8 — Monitoring & Reporting
+# Live metrics stack for the JMeter Backend Listener.
+#   cd monitoring && docker compose up -d
+#   Grafana  http://localhost:3000   (admin / admin)
+#   InfluxDB http://localhost:8086   (db: jmeter)
+#
+# InfluxDB 1.8 deliberately — JMeter's built-in InfluxdbBackendListenerClient
+# speaks the 1.x line protocol. 2.x needs extra token/bucket wiring for no gain here.
+
+services:
+  influxdb:
+    image: influxdb:1.8
+    container_name: azm-influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - INFLUXDB_DB=jmeter
+      - INFLUXDB_HTTP_AUTH_ENABLED=false
+      - INFLUXDB_REPORTING_DISABLED=true
+    volumes:
+      - influx-data:/var/lib/influxdb
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: azm-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ./provisioning/dashboards:/etc/grafana/provisioning/dashboards
+    depends_on:
+      - influxdb
+    restart: unless-stopped
+
+volumes:
+  influx-data:
+  grafana-data:

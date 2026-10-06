@@ -1,0 +1,403 @@
+# CONCEPT 16 — CI/CD Integration (Tier C)
+# Non-GUI JMeter run in a pipeline, HTML report published as a build artifact.
+# All environment/credential values come from GitHub Secrets — never the repo.
+#
+# PRO FEATURES:
+#   - Concurrency group prevents parallel load tests from skewing each other's results
+#   - JMeter cache saves 2+ minutes per build (no re-download on every run)
+#   - Secret scan prevents credential leaks before any code executes
+#   - Static validation catches broken .jmx BEFORE any load (fast-fail in seconds)
+#   - SLA enforcement gate — build FAILS if p95/error-rate exceeds threshold
+#   - Regression detection compares against the previous run's JTL baseline
+#   - H2 embedded database proves JDBC concept without requiring a real DB server
+#   - Self-hosted runner support for internal/VPN targets behind firewalls
+#   - Rich GitHub Step Summary with per-request breakdown and bottleneck identification
+#   - 3-job pipeline (validate → test → analyze) with clear separation of concerns
+
+name: perf-test
+
+# ---------------------------------------------------------------------------
+# Triggers
+# ---------------------------------------------------------------------------
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: 'Load level profile'
+        type: choice
+        options:
+          - smoke
+          - baseline
+          - peak
+          - max
+          - spike
+        default: baseline
+      runner:
+        description: 'Execution environment'
+        type: choice
+        options:
+          - self-hosted
+          - ubuntu-latest
+        default: self-hosted
+      threads:
+        description: 'Override virtual-user count (blank = use level default)'
+        type: string
+        default: ''
+      duration:
+        description: 'Override hold duration in seconds (blank = use level default)'
+        type: string
+        default: ''
+
+# ---------------------------------------------------------------------------
+# Concurrency — only one load test at a time per branch to avoid interference.
+# A second dispatch queues (cancel-in-progress: false) rather than killing the
+# running test, because partial load-test data is expensive to reproduce.
+# ---------------------------------------------------------------------------
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: false
+
+# ---------------------------------------------------------------------------
+# Global environment
+# ---------------------------------------------------------------------------
+env:
+  JMETER_VERSION: '5.6.3'
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# JOBS
+# ═══════════════════════════════════════════════════════════════════════════════
+jobs:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 1: validate — fast pre-flight checks (no JMeter, no load)
+  # ─────────────────────────────────────────────────────────────────────────────
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Secret scan runs FIRST — if credentials leaked into the repo we must
+      # abort before any code reaches a runner that might execute it.
+      - name: Secret scan (prevent credential leaks)
+        run: python3 ci/secret_scan.py
+
+      # Static validation parses .jmx XML, checks file structure, and verifies
+      # required config exists — all without network access or JMeter itself.
+      - name: Static validation (no network, no execution)
+        run: python3 scripts/validate_repo.py
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2: test — run JMeter in non-GUI CLI mode and enforce SLA gates
+  # ─────────────────────────────────────────────────────────────────────────────
+  test:
+    needs: validate
+    runs-on: ${{ inputs.runner || 'self-hosted' }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ── JMeter installation (cached) ──────────────────────────────────────
+      # Caching by version key means a new JMETER_VERSION automatically
+      # triggers a fresh download while keeping builds fast day-to-day.
+      - name: Cache JMeter
+        id: cache-jmeter
+        uses: actions/cache@v4
+        with:
+          path: apache-jmeter-${{ env.JMETER_VERSION }}
+          key: jmeter-${{ env.JMETER_VERSION }}
+
+      - name: Install JMeter (on cache miss)
+        if: steps.cache-jmeter.outputs.cache-hit != 'true'
+        run: |
+          wget -q "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz"
+          tar -xzf "apache-jmeter-${JMETER_VERSION}.tgz"
+          rm -f "apache-jmeter-${JMETER_VERSION}.tgz"
+
+      # ── JDBC driver ───────────────────────────────────────────────────────
+      # H2 is an embedded Java database — it proves the JDBC sampler concept
+      # (Concept 11) inside CI without needing an external database server.
+      - name: Install JDBC driver (H2 for CI proof)
+        run: |
+          wget -q "https://repo1.maven.org/maven2/com/h2database/h2/2.2.224/h2-2.2.224.jar" \
+            -O "apache-jmeter-${JMETER_VERSION}/lib/h2-2.2.224.jar"
+          echo "H2 JDBC driver installed"
+          # Copy any additional drivers bundled in the repo
+          if ls lib/*.jar >/dev/null 2>&1; then
+            cp lib/*.jar "apache-jmeter-${JMETER_VERSION}/lib/"
+            echo "Copied additional JDBC driver(s) from lib/"
+          fi
+
+      # ── Resolve load level parameters ─────────────────────────────────────
+      # Each level maps to a realistic traffic profile. "spike" uses a 1-second
+      # ramp with sync_group_size = threads so all VUs hit simultaneously.
+      - name: Resolve load level
+        id: level
+        run: |
+          LEVEL="${{ inputs.level || 'baseline' }}"
+          case "${LEVEL}" in
+            smoke)    T=1;   R=1;   D=30;   SYNC=1  ;;
+            baseline) T=30;  R=60;  D=600;  SYNC=1  ;;
+            peak)     T=40;  R=90;  D=900;  SYNC=1  ;;
+            max)      T=50;  R=120; D=900;  SYNC=1  ;;
+            spike)    T=30;  R=1;   D=300;  SYNC=30 ;;
+            *)        echo "::error::Unknown level: ${LEVEL}"; exit 1 ;;
+          esac
+          echo "threads=${T}"   >> "$GITHUB_OUTPUT"
+          echo "rampup=${R}"    >> "$GITHUB_OUTPUT"
+          echo "duration=${D}"  >> "$GITHUB_OUTPUT"
+          echo "sync=${SYNC}"   >> "$GITHUB_OUTPUT"
+          echo "### Load Profile: ${LEVEL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Threads=${T}, Ramp-up=${R}s, Duration=${D}s, SyncGroup=${SYNC}" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Execute the load test ─────────────────────────────────────────────
+      # All secrets are injected via -J flags so they never touch disk.
+      # The || 'fallback' pattern ensures CI works even without secrets set.
+      - name: Run performance test (non-GUI, CLI mode)
+        env:
+          PATH_ADD: apache-jmeter-${{ env.JMETER_VERSION }}/bin
+        run: |
+          export PATH="${PATH_ADD}:${PATH}"
+          mkdir -p results
+
+          THREADS="${{ inputs.threads || steps.level.outputs.threads }}"
+          DURATION="${{ inputs.duration || steps.level.outputs.duration }}"
+
+          jmeter -n \
+            -t tests/azm_sba_perf.jmx \
+            -q config/user.properties \
+            -l results/ci.jtl \
+            -j results/jmeter.log \
+            -e -o results/html \
+            -Jbase_url="${{ secrets.BASE_URL }}" \
+            -Jprotocol=https \
+            -Jport=443 \
+            -Jenv=ci \
+            -Jlogin_threads=1 \
+            -Jthreads="${THREADS}" \
+            -Jrampup="${{ steps.level.outputs.rampup }}" \
+            -Jduration="${DURATION}" \
+            -Jsync_group_size="${{ steps.level.outputs.sync }}" \
+            -Jcsvfile="${{ secrets.CSV_FILE || 'data/logins.csv' }}" \
+            -Jjdbc_enabled="${{ secrets.DB_URL && 'true' || 'false' }}" \
+            -Jdb_driver="${{ secrets.DB_DRIVER || 'org.h2.Driver' }}" \
+            -Jdb_url="${{ secrets.DB_URL || 'jdbc:h2:mem:ci;DB_CLOSE_DELAY=-1' }}" \
+            -Jdb_user="${{ secrets.DB_USER || 'sa' }}" \
+            -Jdb_password="${{ secrets.DB_PASSWORD || '' }}" \
+            -Jhmac_secret="${{ secrets.HMAC_SECRET || 'ci-test-secret' }}" \
+            -Jinflux_url="${{ secrets.INFLUX_URL || 'http://localhost:8086/write?db=jmeter' }}"
+
+      # ── SLA enforcement ───────────────────────────────────────────────────
+      # The SLA gate reads the JTL and checks p95, error rate, and throughput
+      # against the configured thresholds for this level. Build FAILS on breach.
+      - name: SLA enforcement gate
+        if: always()
+        run: python3 ci/sla_gate.py results/ci.jtl "${{ inputs.level || 'baseline' }}"
+
+      # ── Regression detection ──────────────────────────────────────────────
+      # Download the previous run's JTL artifact (if it exists) and compare
+      # against the current run. This catches gradual performance degradation
+      # that stays within SLA but trends in the wrong direction.
+      - name: Download previous run baseline (for regression detection)
+        id: prev-artifact
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          name: perf-report-${{ inputs.level || 'baseline' }}-latest
+          path: previous-run
+        continue-on-error: true
+
+      - name: Regression detection (compare against previous run)
+        if: always() && steps.prev-artifact.outcome == 'success'
+        run: |
+          if [ -f previous-run/ci.jtl ]; then
+            echo "Previous baseline found — running regression comparison"
+            python3 scripts/compare_runs.py previous-run/ci.jtl results/ci.jtl || true
+          else
+            echo "No previous JTL found in artifact — skipping regression check"
+          fi
+
+      # ── Upload artifacts ──────────────────────────────────────────────────
+      # Two artifact names: a run-numbered one for history, and a "latest"
+      # one that the next run's regression detection step can download.
+      - name: Upload test artifacts (HTML report + JTL + logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-report-${{ inputs.level || 'baseline' }}-${{ github.run_number }}
+          path: |
+            results/html
+            results/ci.jtl
+            results/jmeter.log
+            results/self-heal.log
+            results/server-metrics.csv
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload latest baseline (for next run regression detection)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-report-${{ inputs.level || 'baseline' }}-latest
+          path: |
+            results/ci.jtl
+          retention-days: 30
+          overwrite: true
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 3: analyze — generate rich GitHub Step Summary from test results
+  # Runs even if the test job failed (if: always()) so we always get diagnostics.
+  # ─────────────────────────────────────────────────────────────────────────────
+  analyze:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository (for scripts)
+        uses: actions/checkout@v4
+
+      - name: Download test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: perf-report-${{ inputs.level || 'baseline' }}-${{ github.run_number }}
+          path: results
+        continue-on-error: true
+
+      - name: Generate rich performance summary
+        if: always()
+        run: |
+          LEVEL="${{ inputs.level || 'baseline' }}"
+          cat >> "$GITHUB_STEP_SUMMARY" <<'HEADER'
+          ## :bar_chart: Performance Test Results
+          HEADER
+
+          # ── Overview table ──────────────────────────────────────────────
+          if [ -f results/ci.jtl ]; then
+            TOTAL_LINES=$(wc -l < results/ci.jtl)
+            TOTAL_SAMPLES=$((TOTAL_LINES - 1))
+            ERRORS=$(grep -c ",false," results/ci.jtl || true)
+            if [ "$TOTAL_SAMPLES" -gt 0 ]; then
+              ERROR_RATE=$(awk "BEGIN { printf \"%.2f\", (${ERRORS}/${TOTAL_SAMPLES})*100 }")
+            else
+              ERROR_RATE="0.00"
+            fi
+
+            cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+
+          | Parameter | Value |
+          |-----------|-------|
+          | **Level** | \`${LEVEL}\` |
+          | **Threads** | ${{ inputs.threads || 'level-default' }} |
+          | **Duration** | ${{ inputs.duration || 'level-default' }}s |
+          | **Total Samples** | ${TOTAL_SAMPLES} |
+          | **Errors** | ${ERRORS} |
+          | **Error Rate** | ${ERROR_RATE}% |
+
+          EOF
+
+            # ── Per-request breakdown table ─────────────────────────────
+            # Parse JTL CSV to compute per-label stats: count, p90, p95, p99, max, error%
+            echo "### Per-Request Breakdown" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Label | Count | p90 (ms) | p95 (ms) | p99 (ms) | Max (ms) | Error% |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|-------|------:|--------:|---------:|---------:|--------:|-------:|" >> "$GITHUB_STEP_SUMMARY"
+
+            # JTL columns: timeStamp,elapsed,label,responseCode,responseMessage,
+            #              threadName,dataType,success,failureMessage,bytes,...
+            # elapsed=col2, label=col3, success=col8
+            awk -F',' 'NR > 1 {
+              label = $3
+              elapsed = $2 + 0
+              success = $8
+              count[label]++
+              times[label][count[label]] = elapsed
+              if (success == "false") errs[label]++
+            }
+            END {
+              for (label in count) {
+                n = count[label]
+                # Sort times for percentile calculation
+                for (i = 1; i <= n; i++) arr[i] = times[label][i]
+                for (i = 1; i <= n; i++)
+                  for (j = i+1; j <= n; j++)
+                    if (arr[i] > arr[j]) { tmp=arr[i]; arr[i]=arr[j]; arr[j]=tmp }
+
+                p90 = arr[int(n*0.90)+1]
+                p95 = arr[int(n*0.95)+1]
+                p99 = arr[int(n*0.99)+1]
+                maxv = arr[n]
+                errpct = (errs[label]+0) / n * 100
+
+                printf "| %s | %d | %d | %d | %d | %d | %.2f |\n", \
+                  label, n, p90, p95, p99, maxv, errpct
+              }
+            }' results/ci.jtl >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "| _(parse error)_ | - | - | - | - | - | - |" >> "$GITHUB_STEP_SUMMARY"
+
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            # ── Bottleneck identification ───────────────────────────────
+            echo "### Bottleneck Identification" >> "$GITHUB_STEP_SUMMARY"
+            SLOWEST=$(awk -F',' 'NR > 1 {
+              label = $3; elapsed = $2 + 0
+              count[label]++; times[label][count[label]] = elapsed
+            }
+            END {
+              max_p95 = 0; max_label = "N/A"
+              for (label in count) {
+                n = count[label]
+                for (i = 1; i <= n; i++) arr[i] = times[label][i]
+                for (i = 1; i <= n; i++)
+                  for (j = i+1; j <= n; j++)
+                    if (arr[i] > arr[j]) { tmp=arr[i]; arr[i]=arr[j]; arr[j]=tmp }
+                p95 = arr[int(n*0.95)+1]
+                if (p95 > max_p95) { max_p95 = p95; max_label = label }
+              }
+              printf "%s (%d ms p95)", max_label, max_p95
+            }' results/ci.jtl 2>/dev/null || echo "N/A")
+
+            echo "> **Slowest transaction (by p95):** ${SLOWEST}" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          else
+            echo "> :warning: **No JTL results file found** — the test may have failed to start." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # ── SLA result ──────────────────────────────────────────────────
+          echo "### SLA Gate" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ needs.test.result }}" = "success" ]; then
+            echo "> :white_check_mark: **PASS** — all SLA thresholds met for \`${LEVEL}\` level." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "> :x: **FAIL** — SLA thresholds breached or test failed. Check the \`test\` job logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # ── Self-healing events ─────────────────────────────────────────
+          if [ -f results/self-heal.log ] && [ -s results/self-heal.log ]; then
+            echo "### Self-Healing Events" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cat results/self-heal.log >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # ── Artifact link ───────────────────────────────────────────────
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download the **perf-report-${LEVEL}-${{ github.run_number }}** artifact from the Actions tab for the full HTML report, JTL data, and logs." >> "$GITHUB_STEP_SUMMARY"

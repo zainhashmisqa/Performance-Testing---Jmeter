@@ -1,0 +1,41 @@
+# Run output — never commit, it is large and regenerable
+results/
+*.jtl
+jmeter.log
+
+# Logs (JMeter, workers, mock server)
+*.log
+
+# Secrets and local overrides — supply these at runtime instead
+config/secrets.properties
+config/*.local.properties
+.env
+
+# JDBC drivers are large binaries; document the version in config/endpoints.md
+# and fetch per machine.
+lib/*.jar
+
+# JMeter scratch
+*.jmx.bak
+jmeter-server.log
+backups/
+
+# RMI keystore — generated per-machine, never commit
+rmi_keystore.jks
+
+# OS / editor / tooling
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
+.kilo/
+
+# Real credentials — never commit
+data/real_logins.csv
+data/real_logins_w*.csv
+
+# Generated per-worker CSV slices and mock state
+data/logins_w*.csv
+mock/*.db
+mock/*.db-wal
+mock/*.db-shm

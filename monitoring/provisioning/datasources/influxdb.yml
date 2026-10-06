@@ -1,0 +1,14 @@
+# Auto-provisions the InfluxDB datasource so Grafana is usable the moment it
+# starts — no manual clicking, and one less thing to get wrong on demo day.
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    database: jmeter
+    isDefault: true
+    editable: true
+    jsonData:
+      httpMode: GET

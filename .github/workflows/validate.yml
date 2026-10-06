@@ -1,0 +1,173 @@
+# PR validation gate — fast, read-only checks that catch structural issues
+# before the heavy performance test workflow runs.
+#
+# This workflow does NOT run JMeter or contact any server.
+# It validates the repo structure, concept coverage, and security hygiene.
+
+name: validate
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python ────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 3. Secret scan ──────────────────────────────────────────────
+      # Prevents accidental credential commits (API keys, tokens, passwords).
+      - name: Secret scan
+        run: python3 ci/secret_scan.py
+
+      # ── 4. Static validation ─────────────────────────────────────────
+      # Verifies:
+      #   - JMX structure and concept coverage
+      #   - Property references are defined
+      #   - JSR223 scripts exist on disk
+      #   - No GUI listeners enabled (they break non-GUI mode)
+      #   - CSV data files have correct format
+      #   - Weighted transaction mix totals 100%
+      - name: Static validation
+        run: python3 scripts/validate_repo.py
+
+      # ── 5. JMX file size check ──────────────────────────────────────
+      # Bloated test plans are a code smell — warn if any .jmx exceeds 500 KB.
+      - name: JMX file size check
+        run: |
+          echo "Checking .jmx file sizes (warn threshold: 500 KB)..."
+          oversized=0
+          for jmx in $(find . -name '*.jmx' -type f); do
+            size=$(stat --format='%s' "$jmx")
+            size_kb=$((size / 1024))
+            if [ "$size_kb" -gt 500 ]; then
+              echo "::warning file=${jmx}::$jmx is ${size_kb} KB — consider splitting or trimming the test plan"
+              oversized=1
+            else
+              echo "  OK: $jmx (${size_kb} KB)"
+            fi
+          done
+          if [ "$oversized" -eq 0 ]; then
+            echo "All .jmx files are within the 500 KB threshold."
+          fi
+
+      # ── 6. Groovy syntax check ──────────────────────────────────────
+      # Basic brace/paren balance is already checked by validate_repo.py.
+      # This step does an additional standalone pass over all .groovy files
+      # to catch unmatched delimiters that might slip through.
+      - name: Groovy syntax check
+        run: |
+          echo "Checking .groovy files for syntax errors..."
+          errors=0
+          for groovy in $(find . -name '*.groovy' -type f); do
+            # Check balanced braces
+            open_braces=$(grep -o '{' "$groovy" | wc -l)
+            close_braces=$(grep -o '}' "$groovy" | wc -l)
+            if [ "$open_braces" -ne "$close_braces" ]; then
+              echo "::error file=${groovy}::Unbalanced braces in $groovy (open: $open_braces, close: $close_braces)"
+              errors=1
+            fi
+
+            # Check balanced parentheses
+            open_parens=$(grep -o '(' "$groovy" | wc -l)
+            close_parens=$(grep -o ')' "$groovy" | wc -l)
+            if [ "$open_parens" -ne "$close_parens" ]; then
+              echo "::error file=${groovy}::Unbalanced parentheses in $groovy (open: $open_parens, close: $close_parens)"
+              errors=1
+            fi
+
+            if [ "$errors" -eq 0 ]; then
+              echo "  OK: $groovy"
+            fi
+          done
+          if [ "$errors" -ne 0 ]; then
+            echo "Groovy syntax errors detected."
+            exit 1
+          fi
+          echo "All .groovy files passed syntax checks."
+
+      # ── 7. YAML lint ────────────────────────────────────────────────
+      # Verify docker-compose.yml and workflow YAMLs are valid.
+      - name: YAML lint
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'PYEOF'
+          import sys, yaml, glob, os
+
+          files = []
+          # docker-compose at repo root
+          for name in ["docker-compose.yml", "docker-compose.yaml"]:
+              if os.path.isfile(name):
+                  files.append(name)
+          # All workflow YAMLs
+          files.extend(glob.glob(".github/workflows/*.yml"))
+          files.extend(glob.glob(".github/workflows/*.yaml"))
+
+          if not files:
+              print("No YAML files found to lint.")
+              sys.exit(0)
+
+          errors = 0
+          for path in sorted(set(files)):
+              try:
+                  with open(path) as f:
+                      list(yaml.safe_load_all(f))
+                  print(f"  OK: {path}")
+              except yaml.YAMLError as e:
+                  print(f"::error file={path}::Invalid YAML in {path}: {e}")
+                  errors += 1
+
+          if errors:
+              print(f"\n{errors} YAML file(s) failed validation.")
+              sys.exit(1)
+          print("\nAll YAML files are valid.")
+          PYEOF
+
+      # ── 8. Step summary ─────────────────────────────────────────────
+      - name: Step summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Validation Results
+
+          | Check | Description |
+          |-------|-------------|
+          | Secret scan | Scanned for accidental credential commits |
+          | Static validation | JMX structure, concept coverage, property refs, JSR223 scripts, GUI listeners, CSV format, weighted mix |
+          | JMX file size | Warned if any `.jmx` exceeds 500 KB |
+          | Groovy syntax | Verified brace/paren balance in `.groovy` files |
+          | YAML lint | Validated `docker-compose.yml` and workflow YAMLs |
+
+          > This workflow is a **read-only gate** — it does not run JMeter or contact any server.
+          EOF
+
+      # ── 9. YAML validation for monitoring stack ────────────────────
+      - name: Verify docker-compose paths
+        run: |
+          echo "Checking monitoring stack references..."
+          if [ -f monitoring/docker-compose.yml ]; then
+            echo "  OK: monitoring/docker-compose.yml exists"
+          else
+            echo "::error::monitoring/docker-compose.yml is missing"
+            exit 1
+          fi
+          if [ -f monitoring/provisioning/dashboards/azm-sba-perf.json ]; then
+            echo "  OK: Grafana dashboard JSON exists"
+          else
+            echo "::warning::Grafana dashboard JSON missing — Concept 8 evidence will be incomplete"
+          fi
+          if [ -f monitoring/provisioning/datasources/influxdb.yml ]; then
+            echo "  OK: InfluxDB datasource provisioning exists"
+          else
+            echo "::warning::InfluxDB datasource YAML missing"
+          fi

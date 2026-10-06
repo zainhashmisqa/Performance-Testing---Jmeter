@@ -1,0 +1,253 @@
+# Proof-of-concept evidence collector — Concepts 11 (JDBC), 15 (Retry), 17 (Self-Heal)
+#
+# Runs targeted smoke tests that deliberately trigger each concept's mechanism,
+# then uploads the evidence logs as artifacts for the grading report.
+#
+# Manual dispatch only — these are not load tests, just functional proofs.
+
+name: proof-tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      proof:
+        description: 'Which proof to collect'
+        type: choice
+        options: [all, self-heal, jdbc, retry]
+        default: all
+      runner:
+        description: 'Where to run'
+        type: choice
+        options: [self-hosted, ubuntu-latest]
+        default: self-hosted
+
+env:
+  JMETER_VERSION: 5.6.3
+
+jobs:
+  proof-tests:
+    runs-on: ${{ inputs.runner || 'self-hosted' }}
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache JMeter
+        id: cache-jmeter
+        uses: actions/cache@v4
+        with:
+          path: apache-jmeter-${{ env.JMETER_VERSION }}
+          key: jmeter-${{ env.JMETER_VERSION }}
+
+      - name: Install JMeter
+        if: steps.cache-jmeter.outputs.cache-hit != 'true'
+        run: |
+          wget -q "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz"
+          tar -xzf "apache-jmeter-${JMETER_VERSION}.tgz"
+
+      - name: Install H2 JDBC driver
+        run: |
+          wget -q "https://repo1.maven.org/maven2/com/h2database/h2/2.2.224/h2-2.2.224.jar" \
+            -O "apache-jmeter-${JMETER_VERSION}/lib/h2-2.2.224.jar"
+          echo "H2 JDBC driver installed for Concept 11 proof"
+          if ls lib/*.jar >/dev/null 2>&1; then
+            cp lib/*.jar "apache-jmeter-${JMETER_VERSION}/lib/"
+            echo "Copied additional JDBC driver(s)"
+          fi
+
+      # ── Concept 17: Self-Healing Proof ──────────────────────────────────
+      - name: 'Proof: Self-Heal (Concept 17)'
+        if: inputs.proof == 'all' || inputs.proof == 'self-heal'
+        env:
+          PATH_ADD: apache-jmeter-${{ env.JMETER_VERSION }}/bin
+        run: |
+          export PATH="${PATH_ADD}:$PATH"
+          mkdir -p results
+          echo "=== Self-Heal Proof ==="
+          echo "Simulating API field rename: $.sessionToken → $.sessionToken_renamed_by_api"
+          echo "The self-healing PostProcessor should detect NOT_FOUND and find the real token via alias scan"
+
+          jmeter -n \
+            -t tests/azm_sba_perf.jmx \
+            -q config/user.properties \
+            -l results/self-heal.jtl \
+            -j results/jmeter-self-heal.log \
+            -Jbase_url="${{ secrets.BASE_URL }}" \
+            -Jprotocol=https -Jport=443 \
+            -Jenv=ci \
+            -Jthreads=1 -Jduration=30 -Jrampup=1 -Jlogin_threads=1 \
+            -Jsync_group_size=1 \
+            -Jcsvfile="${{ secrets.CSV_FILE || 'data/logins.csv' }}" \
+            -Jtoken_json_path='$.sessionToken_renamed_by_api' \
+            -Jjdbc_enabled=false \
+            -Jhmac_secret="${{ secrets.HMAC_SECRET || 'ci-test-secret' }}" \
+            -Jinflux_url="${{ secrets.INFLUX_URL || 'http://localhost:8086/write?db=jmeter' }}" || true
+
+          echo ""
+          echo "--- Self-Heal Evidence ---"
+          if [ -f results/self-heal.log ]; then
+            cat results/self-heal.log
+          else
+            echo "WARNING: results/self-heal.log not found"
+          fi
+
+      - name: 'Check: Self-Heal result'
+        if: inputs.proof == 'all' || inputs.proof == 'self-heal'
+        id: selfheal
+        run: |
+          if [ -f results/self-heal.log ] && grep -q "HEALED" results/self-heal.log; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+            echo "✅ Self-heal proof: PASS — HEALED event found in log"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "❌ Self-heal proof: FAIL — no HEALED event detected"
+          fi
+
+      # ── Concept 11: JDBC Validation Proof ───────────────────────────────
+      - name: 'Proof: JDBC Validation (Concept 11)'
+        if: inputs.proof == 'all' || inputs.proof == 'jdbc'
+        env:
+          PATH_ADD: apache-jmeter-${{ env.JMETER_VERSION }}/bin
+        run: |
+          export PATH="${PATH_ADD}:$PATH"
+          mkdir -p results
+          echo "=== JDBC Validation Proof ==="
+          echo "Running with H2 embedded database to prove JDBC sampler executes"
+
+          jmeter -n \
+            -t tests/azm_sba_perf.jmx \
+            -q config/user.properties \
+            -l results/jdbc.jtl \
+            -j results/jmeter-jdbc.log \
+            -Jbase_url="${{ secrets.BASE_URL }}" \
+            -Jprotocol=https -Jport=443 \
+            -Jenv=ci \
+            -Jthreads=1 -Jduration=30 -Jrampup=1 -Jlogin_threads=1 \
+            -Jsync_group_size=1 \
+            -Jcsvfile="${{ secrets.CSV_FILE || 'data/logins.csv' }}" \
+            -Jjdbc_enabled=true \
+            -Jdb_driver=org.h2.Driver \
+            -Jdb_url='jdbc:h2:mem:ci;DB_CLOSE_DELAY=-1' \
+            -Jdb_user=sa \
+            -Jdb_password= \
+            -Jhmac_secret="${{ secrets.HMAC_SECRET || 'ci-test-secret' }}" \
+            -Jinflux_url="${{ secrets.INFLUX_URL || 'http://localhost:8086/write?db=jmeter' }}" || true
+
+          echo ""
+          echo "--- JDBC Evidence ---"
+          if [ -f results/jdbc.jtl ]; then
+            echo "JTL file generated ($(wc -l < results/jdbc.jtl) lines)"
+            head -20 results/jdbc.jtl
+          else
+            echo "WARNING: results/jdbc.jtl not found"
+          fi
+
+      - name: 'Check: JDBC result'
+        if: inputs.proof == 'all' || inputs.proof == 'jdbc'
+        id: jdbc
+        run: |
+          if [ -f results/jdbc.jtl ] && grep -qi "jdbc\|JDBC\|db_validation\|DB_Validation" results/jdbc.jtl; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+            echo "✅ JDBC proof: PASS — JDBC sampler labels found in JTL"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "❌ JDBC proof: FAIL — no JDBC sampler labels in JTL"
+          fi
+
+      # ── Concept 15: Retry Logic Proof ───────────────────────────────────
+      - name: 'Proof: Retry Logic (Concept 15)'
+        if: inputs.proof == 'all' || inputs.proof == 'retry'
+        env:
+          PATH_ADD: apache-jmeter-${{ env.JMETER_VERSION }}/bin
+        run: |
+          export PATH="${PATH_ADD}:$PATH"
+          mkdir -p results
+          echo "=== Retry Logic Proof ==="
+          echo "Running with force_fail=true to trigger retry mechanism"
+
+          jmeter -n \
+            -t tests/azm_sba_perf.jmx \
+            -q config/user.properties \
+            -l results/retry.jtl \
+            -j results/jmeter-retry.log \
+            -Jbase_url="${{ secrets.BASE_URL }}" \
+            -Jprotocol=https -Jport=443 \
+            -Jenv=ci \
+            -Jthreads=1 -Jduration=30 -Jrampup=1 -Jlogin_threads=1 \
+            -Jsync_group_size=1 \
+            -Jcsvfile="${{ secrets.CSV_FILE || 'data/logins.csv' }}" \
+            -Jforce_fail=true \
+            -Jjdbc_enabled=false \
+            -Jhmac_secret="${{ secrets.HMAC_SECRET || 'ci-test-secret' }}" \
+            -Jinflux_url="${{ secrets.INFLUX_URL || 'http://localhost:8086/write?db=jmeter' }}" || true
+
+          echo ""
+          echo "--- Retry Evidence ---"
+          if [ -f results/jmeter-retry.log ]; then
+            grep -i "retry\|RETRY\|attempt\|Retrying" results/jmeter-retry.log || echo "No retry messages found in log"
+          else
+            echo "WARNING: results/jmeter-retry.log not found"
+          fi
+
+      - name: 'Check: Retry result'
+        if: inputs.proof == 'all' || inputs.proof == 'retry'
+        id: retry
+        run: |
+          if [ -f results/jmeter-retry.log ] && grep -qi "retry\|retrying\|attempt" results/jmeter-retry.log; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+            echo "✅ Retry proof: PASS — retry log messages found"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "❌ Retry proof: FAIL — no retry messages detected in log"
+          fi
+
+      # ── Upload Evidence ─────────────────────────────────────────────────
+      - name: Upload proof evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-evidence-${{ inputs.proof || 'all' }}-${{ github.run_number }}
+          path: |
+            results/self-heal.log
+            results/self-heal.jtl
+            results/jdbc.jtl
+            results/retry.jtl
+            results/jmeter-self-heal.log
+            results/jmeter-jdbc.log
+            results/jmeter-retry.log
+          retention-days: 30
+          if-no-files-found: warn
+
+      # ── Summary ─────────────────────────────────────────────────────────
+      - name: Proof results summary
+        if: always()
+        run: |
+          echo "## Proof-of-Concept Evidence Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Concept | Proof | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
+
+          PROOF="${{ inputs.proof || 'all' }}"
+
+          if [ "$PROOF" = "all" ] || [ "$PROOF" = "self-heal" ]; then
+            echo "| 17 — Self-Healing | Token path rename triggers alias scan | ${{ steps.selfheal.outputs.result || 'SKIP' }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "$PROOF" = "all" ] || [ "$PROOF" = "jdbc" ]; then
+            echo "| 11 — JDBC Validation | H2 embedded DB sampler executes | ${{ steps.jdbc.outputs.result || 'SKIP' }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "$PROOF" = "all" ] || [ "$PROOF" = "retry" ]; then
+            echo "| 15 — Retry Logic | force_fail triggers retry attempts | ${{ steps.retry.outputs.result || 'SKIP' }} |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Runner:** ${{ inputs.runner || 'self-hosted' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Evidence artifacts uploaded with 30-day retention." >> $GITHUB_STEP_SUMMARY
