@@ -401,3 +401,304 @@ jobs:
           # ── Artifact link ───────────────────────────────────────────────
           echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
           echo "Download the **perf-report-${LEVEL}-${{ github.run_number }}** artifact from the Actions tab for the full HTML report, JTL data, and logs." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "> **Live Report:** https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" >> "$GITHUB_STEP_SUMMARY"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 4: publish — deploy HTML report + dashboard to GitHub Pages
+  # Runs after analyze. Publishes the JMeter HTML report and a custom
+  # performance dashboard as a live site anyone can view without downloading
+  # artifacts. Accessible at:
+  #   https://<org>.github.io/<repo>/
+  # ─────────────────────────────────────────────────────────────────────────────
+  publish:
+    needs: [test, analyze]
+    if: always() && needs.test.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: perf-report-${{ inputs.level || 'baseline' }}-${{ github.run_number }}
+          path: results
+        continue-on-error: true
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build Pages site
+        run: |
+          mkdir -p _site
+
+          LEVEL="${{ inputs.level || 'baseline' }}"
+          THREADS="${{ inputs.threads || 'default' }}"
+          DURATION="${{ inputs.duration || 'default' }}"
+          RUN_NUM="${{ github.run_number }}"
+          RUN_DATE="$(date -u '+%Y-%m-%d %H:%M UTC')"
+          REPO="${{ github.repository }}"
+
+          # ── Copy JMeter HTML report ──────────────────────────────────
+          if [ -d results/html ]; then
+            cp -r results/html _site/report
+          fi
+
+          # ── Copy dashboard screenshots ───────────────────────────────
+          mkdir -p _site/screenshots
+          if [ -d docs/screenshots ]; then
+            cp docs/screenshots/*.png _site/screenshots/ 2>/dev/null || true
+          fi
+
+          # ── Parse JTL for dashboard data ─────────────────────────────
+          JTL_DATA=""
+          TOTAL_SAMPLES=0
+          TOTAL_ERRORS=0
+          ERROR_RATE="0.00"
+          if [ -f results/ci.jtl ]; then
+            TOTAL_LINES=$(wc -l < results/ci.jtl)
+            TOTAL_SAMPLES=$((TOTAL_LINES - 1))
+            TOTAL_ERRORS=$(grep -c ",false," results/ci.jtl || true)
+            if [ "$TOTAL_SAMPLES" -gt 0 ]; then
+              ERROR_RATE=$(awk "BEGIN { printf \"%.2f\", (${TOTAL_ERRORS}/${TOTAL_SAMPLES})*100 }")
+            fi
+
+            # Generate per-label JSON data for charts
+            JTL_DATA=$(python3 -c "
+          import csv, json, sys
+          from collections import defaultdict
+
+          labels = defaultdict(lambda: {'times': [], 'errors': 0, 'count': 0})
+          with open('results/ci.jtl') as f:
+              reader = csv.DictReader(f)
+              for row in reader:
+                  label = row.get('label', 'unknown')
+                  elapsed = int(row.get('elapsed', 0))
+                  success = row.get('success', 'true')
+                  labels[label]['times'].append(elapsed)
+                  labels[label]['count'] += 1
+                  if success == 'false':
+                      labels[label]['errors'] += 1
+
+          result = []
+          for label, data in sorted(labels.items()):
+              times = sorted(data['times'])
+              n = len(times)
+              if n == 0: continue
+              result.append({
+                  'label': label,
+                  'count': n,
+                  'avg': round(sum(times)/n),
+                  'min': times[0],
+                  'max': times[-1],
+                  'p90': times[int(n*0.90)] if n > 0 else 0,
+                  'p95': times[int(n*0.95)] if n > 0 else 0,
+                  'p99': times[int(n*0.99)] if n > 0 else 0,
+                  'errors': data['errors'],
+                  'errorPct': round(data['errors']/n*100, 2) if n > 0 else 0
+              })
+          print(json.dumps(result))
+          " 2>/dev/null || echo "[]")
+          fi
+
+          # ── Generate dashboard HTML ──────────────────────────────────
+          cat > _site/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>AZM Performance Dashboard</title>
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+            <style>
+              :root {
+                --bg: #0d1117; --surface: #161b22; --border: #30363d;
+                --text: #e6edf3; --text-muted: #8b949e;
+                --green: #3fb950; --red: #f85149; --blue: #58a6ff;
+                --yellow: #d29922; --purple: #bc8cff; --cyan: #39d2c0;
+              }
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; padding: 24px; min-height: 100vh; }
+              .header { text-align: center; margin-bottom: 32px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+              .header h1 { font-size: 28px; font-weight: 600; margin-bottom: 8px; }
+              .header .meta { color: var(--text-muted); font-size: 14px; }
+              .header .meta span { margin: 0 12px; }
+              .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+              .badge-pass { background: #238636; color: #fff; }
+              .badge-fail { background: #da3633; color: #fff; }
+              .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 32px; }
+              .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; text-align: center; }
+              .stat-card .value { font-size: 32px; font-weight: 700; font-variant-numeric: tabular-nums; }
+              .stat-card .label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+              .stat-card.green .value { color: var(--green); }
+              .stat-card.red .value { color: var(--red); }
+              .stat-card.blue .value { color: var(--blue); }
+              .stat-card.yellow .value { color: var(--yellow); }
+              .stat-card.purple .value { color: var(--purple); }
+              .stat-card.cyan .value { color: var(--cyan); }
+              .section { margin-bottom: 32px; }
+              .section h2 { font-size: 18px; font-weight: 600; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+              .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 24px; }
+              .chart-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+              .chart-box h3 { font-size: 14px; color: var(--text-muted); margin-bottom: 12px; }
+              table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+              th { text-align: left; padding: 10px 12px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+              td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+              tr:hover { background: rgba(88, 166, 255, 0.05); }
+              .num { text-align: right; }
+              .err-high { color: var(--red); font-weight: 600; }
+              .err-low { color: var(--green); }
+              .screenshots { margin-top: 32px; }
+              .screenshots img { width: 100%; border-radius: 8px; border: 1px solid var(--border); margin-bottom: 16px; }
+              .links { display: flex; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
+              .links a { display: inline-block; padding: 8px 20px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 500; }
+              .links .primary { background: #238636; color: #fff; }
+              .links .secondary { background: var(--surface); color: var(--blue); border: 1px solid var(--border); }
+              .footer { text-align: center; color: var(--text-muted); font-size: 12px; margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--border); }
+              @media (max-width: 600px) {
+                body { padding: 16px; }
+                .stats { grid-template-columns: repeat(2, 1fr); }
+                .chart-grid { grid-template-columns: 1fr; }
+              }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <h1>AZM Performance Dashboard</h1>
+              <div class="meta">
+                <span id="run-date"></span>
+                <span id="run-level"></span>
+                <span id="run-number"></span>
+                <span id="sla-badge"></span>
+              </div>
+              <div class="links" style="justify-content: center; margin-top: 12px;">
+                <a class="primary" href="report/index.html">Full HTML Report</a>
+                <a class="secondary" id="repo-link" href="#">GitHub Repository</a>
+              </div>
+            </div>
+
+            <div class="stats" id="stat-cards"></div>
+
+            <div class="section">
+              <h2>Per-Request Breakdown</h2>
+              <div style="overflow-x: auto;">
+                <table id="results-table">
+                  <thead>
+                    <tr><th>Label</th><th class="num">Samples</th><th class="num">Avg (ms)</th><th class="num">p90</th><th class="num">p95</th><th class="num">p99</th><th class="num">Max</th><th class="num">Errors</th><th class="num">Error %</th></tr>
+                  </thead>
+                  <tbody id="results-body"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="section">
+              <h2>Response Time Distribution</h2>
+              <div class="chart-grid">
+                <div class="chart-box"><h3>p95 Response Time by Request</h3><canvas id="chart-p95"></canvas></div>
+                <div class="chart-box"><h3>Error Rate by Request</h3><canvas id="chart-errors"></canvas></div>
+              </div>
+            </div>
+
+            <div class="section screenshots">
+              <h2>Grafana Dashboard (Live Monitoring)</h2>
+              <img src="screenshots/grafana-overview.png" alt="Grafana Overview and Response Time">
+              <img src="screenshots/grafana-results.png" alt="Grafana Test Results and Weighted Mix">
+              <img src="screenshots/grafana-distributed.png" alt="Grafana Distributed Load Testing">
+            </div>
+
+            <div class="footer">
+              AZM QA — JMeter Performance Testing Framework &bull; 17 Concepts &bull; 49 Properties &bull; Zero Hardcoded Values
+            </div>
+
+            <script>
+              const DATA = __JTL_DATA__;
+              const META = __META_DATA__;
+
+              document.getElementById('run-date').textContent = META.date;
+              document.getElementById('run-level').textContent = 'Level: ' + META.level;
+              document.getElementById('run-number').textContent = 'Run #' + META.runNumber;
+              document.getElementById('repo-link').href = 'https://github.com/' + META.repo;
+
+              const badge = document.getElementById('sla-badge');
+              if (META.errorRate <= 2) {
+                badge.innerHTML = '<span class="badge badge-pass">SLA PASS</span>';
+              } else {
+                badge.innerHTML = '<span class="badge badge-fail">SLA FAIL</span>';
+              }
+
+              const cards = document.getElementById('stat-cards');
+              const statItems = [
+                { label: 'Total Samples', value: META.totalSamples.toLocaleString(), cls: 'blue' },
+                { label: 'Error Rate', value: META.errorRate + '%', cls: parseFloat(META.errorRate) > 1 ? 'red' : 'green' },
+                { label: 'Errors', value: META.totalErrors.toLocaleString(), cls: META.totalErrors > 0 ? 'red' : 'green' },
+                { label: 'Load Level', value: META.level.toUpperCase(), cls: 'purple' },
+                { label: 'Threads', value: META.threads, cls: 'cyan' },
+                { label: 'Duration', value: META.duration + 's', cls: 'yellow' },
+              ];
+              cards.innerHTML = statItems.map(s =>
+                '<div class="stat-card ' + s.cls + '"><div class="value">' + s.value + '</div><div class="label">' + s.label + '</div></div>'
+              ).join('');
+
+              const tbody = document.getElementById('results-body');
+              DATA.forEach(d => {
+                const errClass = d.errorPct > 1 ? 'err-high' : 'err-low';
+                tbody.innerHTML += '<tr><td>' + d.label + '</td><td class="num">' + d.count +
+                  '</td><td class="num">' + d.avg + '</td><td class="num">' + d.p90 +
+                  '</td><td class="num">' + d.p95 + '</td><td class="num">' + d.p99 +
+                  '</td><td class="num">' + d.max + '</td><td class="num">' + d.errors +
+                  '</td><td class="num ' + errClass + '">' + d.errorPct + '%</td></tr>';
+              });
+
+              const txLabels = DATA.filter(d => d.label.startsWith('TX-') || d.label.startsWith('S0'));
+              const colors = ['#58a6ff', '#3fb950', '#d29922', '#f85149', '#bc8cff', '#39d2c0', '#f0883e', '#8b949e'];
+
+              if (txLabels.length > 0) {
+                new Chart(document.getElementById('chart-p95'), {
+                  type: 'bar',
+                  data: {
+                    labels: txLabels.map(d => d.label),
+                    datasets: [{ label: 'p95 (ms)', data: txLabels.map(d => d.p95), backgroundColor: colors.slice(0, txLabels.length), borderRadius: 4 }]
+                  },
+                  options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } }, x: { grid: { display: false }, ticks: { color: '#8b949e', maxRotation: 45 } } } }
+                });
+
+                new Chart(document.getElementById('chart-errors'), {
+                  type: 'bar',
+                  data: {
+                    labels: txLabels.map(d => d.label),
+                    datasets: [{ label: 'Error %', data: txLabels.map(d => d.errorPct), backgroundColor: txLabels.map(d => d.errorPct > 1 ? '#f85149' : '#3fb950'), borderRadius: 4 }]
+                  },
+                  options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#30363d' }, ticks: { color: '#8b949e' } }, x: { grid: { display: false }, ticks: { color: '#8b949e', maxRotation: 45 } } } }
+                });
+              }
+            </script>
+          </body>
+          </html>
+          HTMLEOF
+
+          # ── Inject real data into the HTML template ──────────────────
+          # Replace placeholder tokens with actual JSON data
+          sed -i "s|__JTL_DATA__|${JTL_DATA:-[]}|g" _site/index.html
+          sed -i "s|__META_DATA__|{\"date\":\"${RUN_DATE}\",\"level\":\"${LEVEL}\",\"runNumber\":\"${RUN_NUM}\",\"repo\":\"${REPO}\",\"totalSamples\":${TOTAL_SAMPLES},\"totalErrors\":${TOTAL_ERRORS},\"errorRate\":\"${ERROR_RATE}\",\"threads\":\"${THREADS}\",\"duration\":\"${DURATION}\"}|g" _site/index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
