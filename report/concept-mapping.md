@@ -19,7 +19,7 @@
 | SLA thresholds | Baseline: p95 ≤ 2s, err ≤ 1% · Peak: p95 ≤ 3s, err < 2% · Spike: p95 ≤ 4s, err < 5% |
 | Graded results | **PENDING** — awaiting authorized load window against live target |
 | Tier A (14 concepts) | 14/14 implemented — structurally verified via `validate_repo.py` (0 errors) |
-| Tier B (3 concepts) | 3/3 delivered — Distributed (5,101 samples proven), CI/CD (3 workflows + Pages dashboard), Self-healing (Layer 1 deterministic) |
+| Tier B (3 concepts) | 3/3 implemented — Distributed (plumbing proven on one localhost worker; needs 2+ hosts for a graded result), CI/CD (3 workflows + Pages dashboard, not yet triggered), Self-healing (proven: 3 heals, 0 errors with the extractor broken) |
 | Static validation | `validate_repo.py`: 0 errors, 1 warning (pyyaml not installed) |
 | Secret scan | `ci/secret_scan.py`: **PASSED** — 0 committed secrets |
 | Properties | 49 distinct `__P()` references — zero hardcoded operational values |
@@ -31,7 +31,9 @@
 
 The entire framework — script structure, assertions, correlation, retry logic, self-healing,
 distributed topology, CI/CD pipeline, monitoring stack — is **built, validated, and runnable**.
-Mock server runs confirm the flow executes end-to-end (305 samples, 16 labels, 0 framework errors).
+A run against the local mock confirms the flow executes end-to-end: 312 samples
+across 21 labels, 2.56% errors, every one of which is the mock's deliberate
+200-with-error-body injection being caught by a body assertion (see 11.0).
 What remains is pointing it at the real target with `-Jbase_url=...` and running the graded load levels.
 
 ---
@@ -169,7 +171,7 @@ external by nature (distributed topology and CI pipeline).
 | 10 | Dynamic Auth Headers | HTTP Header Manager -> `Authorization: Bearer ${authToken}` | Test Plan > `CONCEPT 10 — HTTP Header Manager` | Zero literal tokens in the plan |
 | 13 | Custom Timers | Gaussian Random Timer (2000 +/- 1000 ms); Synchronizing Timer **enabled**, groupSize property-driven; Constant Timer | One per TX branch; Main TG > SyncTimer | `run/spike.ps1` passes `-Jsync_group_size=50` for a true coordinated burst; a no-op at the default of 1, with `sync_timeout` as the anti-deadlock valve |
 | 9 | Order Controllers | Random Controller (browse path), Interleave Controller (cart entry) | TX-01 Browse; TX-02 Explore | Non-sequential VU traversal |
-| 1 | Weighted Mix | 3 x Throughput Controller, Percent Executions: `${__P(pct_browse,50)}` / `${__P(pct_cart,30)}` / `${__P(pct_checkout,20)}` | Main TG, three branches | Measured: exactly 50.0/30.0/20.0 distribution |
+| 1 | Weighted Mix | 3 x Throughput Controller, Percent Executions: `${__P(pct_browse,50)}` / `${__P(pct_cart,30)}` / `${__P(pct_checkout,20)}` | Main TG, three branches | Measured on the mock run: 50.6 / 28.9 / 20.5 across 83 transactions. Percent Executions is probabilistic, so it converges on the target rather than hitting it exactly at low sample counts |
 | 14 | Config Management | Every value via `${__P(name,default)}` — **49 distinct properties** | Entire plan | `config/user.properties` + env overlays; switch environment with flags only |
 | 6 | JSR223 Scripting | Groovy PreProcessor: HMAC-SHA256 signature + dynamic payload + nonce, `cacheKey=true` | TX-03 > `CONCEPT 6` | `scripts/groovy/signature_preprocessor.groovy` |
 | 15 | Error Handling & Retry | While Controller + Groovy PostProcessor, max `${__P(max_retries,3)}` attempts, linear backoff, body-aware success check | TX-03 > `CONCEPT 15 — Retry loop` | Provable with `-Jforce_fail=true` |
@@ -309,7 +311,10 @@ Controller (this machine)                Workers (remote JVMs)
 
 ### Distributed test evidence
 
-**Plumbing proof run** (localhost, mock target — proves the distributed pipeline works):
+**Plumbing proof run** (localhost, 1 worker). What this run establishes is that
+the distributed *mechanism* works — `-G` property forwarding reaches the worker,
+the merged JTL is produced, the post-run contribution analysis renders, and the
+Grafana distributed section populates.
 
 | Metric | Value |
 |---|---|
@@ -317,15 +322,22 @@ Controller (this machine)                Workers (remote JVMs)
 | Total samples | 5,101 |
 | Peak VUs | 51 |
 | Workers | 1 (port 1099, localhost) |
-| p90 | 44 ms |
-| p99 | 104 ms |
 | Grafana section | Distributed Load Testing (Concept 7) — all 8 panels populated |
 
-> **Note:** The script enforces `Workers.Count >= 2` for real runs. The localhost
-> proof used 1 worker to validate the full pipeline: `-G` property forwarding,
-> CSV partitioning, merged JTL, post-run contribution analysis, and Grafana
-> dashboard population. Real 2+ machine distributed run requires workers on the
-> target's subnet — pending infrastructure access.
+> **The response times from this run are not usable, and it is worth stating why.**
+> It predates the mock contract fix described in 11.0: the mock was still serving
+> an older Open edX shape while the plan called `/api/catalog/...`, so the large
+> majority of those 5,101 samples were 404s. The Grafana screenshot for this run
+> shows that error count. The timings are therefore the cost of a 404, not of the
+> application, and no latency conclusion should be drawn from them.
+>
+> The mechanism is still demonstrated, because RMI forwarding and result merging
+> do not care what status code the target returned. But this run must be re-done
+> against the corrected mock before any number from it is quoted.
+
+> **Note:** The script enforces `Workers.Count >= 2` for real runs. A graded
+> distributed result needs workers on the target's subnet — pending
+> infrastructure access.
 
 ---
 
