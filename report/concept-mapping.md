@@ -23,7 +23,9 @@
 | Static validation | `validate_repo.py`: 0 errors, 1 warning (pyyaml not installed) |
 | Secret scan | `ci/secret_scan.py`: **PASSED** — 0 committed secrets |
 | Properties | 49 distinct `__P()` references — zero hardcoded operational values |
-| JMX quality | 1,368 lines, 54 assertions, 18 HTTP samplers, 16 JSON extractors, 12 Groovy scripts |
+| JMX quality | 1,566 lines, 58 assertions, 19 HTTP samplers, 18 JSON extractors, 12 Groovy scripts |
+| Chaining | 6 samplers address a captured id into their path/query; JDBC keys on `${enrollmentId}` |
+| Framework verification | 312 samples against the local mock, 2.56% errors — all deliberate injection (see 11.0) |
 
 ### What this submission proves without the live target
 
@@ -118,7 +120,7 @@ Load activity/
 | Run Scripts | 9 |
 | CI Scripts | 3 |
 | GitHub Workflows | 3 |
-| Lines of JMX XML | 1,368 |
+| Lines of JMX XML | 1,566 |
 
 ---
 
@@ -161,11 +163,11 @@ external by nature (distributed topology and CI pipeline).
 | # | Concept | JMeter Element | Location in .jmx | Evidence |
 |---|---|---|---|---|
 | 3 | Parameterization | CSV Data Set Config — 120 rows, `shareMode=All`, `recycle=true` | Test Plan > `CONCEPT 3 — CSV Data Set` | `data/logins.csv` (120 synthetic accounts) |
-| 12 | Assertions | 54 assertions: JSONPath on `$.status` (regex), Response on body, Duration on checkout SLA, expected values property-driven (`${__P(expected_category)}`, `${__P(expected_currency)}`, `${__P(expected_tax_percent)}`) | Every sampler — S00 through TX-03 | Asserts on **body content**, not HTTP 200 |
-| 2 | Correlation | 16 JSON Extractors -> `authToken`, `userId`, `courseSlug`, `enrollmentId`, `certId`, `categorySlug`, `catalogCourseId` etc. | setUp > S00 Login; S01-S08 across all branches | Default `NOT_FOUND` triggers self-heal |
-| 4 | Request Chaining | Extracted vars reused in URL path and POST body across requests | `S02 /courses/${courseSlug}`; `S04 body course_id`; `S08 /orders/${orderId}` | 16 chained variables across 18 samplers |
+| 12 | Assertions | 58 assertions: JSONPath on `$.status` (regex), Response on body, Duration on checkout SLA, the course-detail assertion comparing `$.slug` against the slug the request was built from, expected values property-driven (`${__P(expected_category)}`, `${__P(expected_currency)}`, `${__P(expected_tax_percent)}`) | Every sampler — S00 through TX-03 | Asserts on **body content**, not HTTP 200 |
+| 2 | Correlation | 18 JSON Extractors -> `authToken`, `userId`, `courseSlug`, `enrollmentId`, `certId`, `categorySlug`, `catalogCourseSlug`, `detailCourseId` etc. Every correlated variable is seeded with a sentinel default at Test Plan scope | setUp > S00 Login; S01-S08 across all branches | Captures are consumed downstream (see Concept 4), not dead values; sentinel defaults prevent an unset variable becoming a literal `${name}` in a URL |
+| 4 | Request Chaining | Captured ids addressed into later URL paths and query strings: categories -> filtered search -> course detail, kept atomic by a Simple Controller | `S01d ?category=${categorySlug}`; `S01e /courses/${catalogCourseSlug}/`; `S03d ?search=${courseSlug}`; `S07 ?course=${courseSlug}`; `S08 ?course=&cert=${certId}`; `S06 ?user=${userId}` | 6 samplers consume an upstream value + JDBC keys on `${enrollmentId}`; detail asserts `$.slug` equals the slug requested |
 | 10 | Dynamic Auth Headers | HTTP Header Manager -> `Authorization: Bearer ${authToken}` | Test Plan > `CONCEPT 10 — HTTP Header Manager` | Zero literal tokens in the plan |
-| 13 | Custom Timers | Gaussian Random Timer (2000 +/- 1000 ms); Synchronizing Timer for spike burst; Constant Timer | One per TX branch; Main TG > SyncTimer | SyncTimer is no-op by default (`sync_group_size=1`) |
+| 13 | Custom Timers | Gaussian Random Timer (2000 +/- 1000 ms); Synchronizing Timer **enabled**, groupSize property-driven; Constant Timer | One per TX branch; Main TG > SyncTimer | `run/spike.ps1` passes `-Jsync_group_size=50` for a true coordinated burst; a no-op at the default of 1, with `sync_timeout` as the anti-deadlock valve |
 | 9 | Order Controllers | Random Controller (browse path), Interleave Controller (cart entry) | TX-01 Browse; TX-02 Explore | Non-sequential VU traversal |
 | 1 | Weighted Mix | 3 x Throughput Controller, Percent Executions: `${__P(pct_browse,50)}` / `${__P(pct_cart,30)}` / `${__P(pct_checkout,20)}` | Main TG, three branches | Measured: exactly 50.0/30.0/20.0 distribution |
 | 14 | Config Management | Every value via `${__P(name,default)}` — **49 distinct properties** | Entire plan | `config/user.properties` + env overlays; switch environment with flags only |
@@ -179,7 +181,7 @@ external by nature (distributed topology and CI pipeline).
 
 | # | Concept | Implementation | Location | Evidence |
 |---|---|---|---|---|
-| 7 | Distributed Load | `run/distributed.ps1` — controller + workers, `-G` property forwarding (not `-J`), per-worker CSV partitioning, post-run contribution analysis | `run/distributed.ps1` + `run/worker-start.ps1` | 5,101 samples across 51 VUs on `azm_distributed` (verified in InfluxDB) |
+| 7 | Distributed Load | `run/distributed.ps1` — controller + workers, `-G` property forwarding (not `-J`), per-worker CSV partitioning, fixed RMI ports, NTP check, post-run contribution analysis | `run/distributed.ps1` + `run/worker-start.ps1` | **Plumbing proven only** — a single localhost worker; the controller forwards 30+ properties via `-G` and the per-worker breakdown renders. A graded distributed result needs 2+ hosts on the subnet (see 11.5) |
 | 16 | CI/CD Integration | 3 GitHub Actions workflows + GitHub Pages dashboard: `perf.yml` (4-job pipeline with SLA gate + regression detection + live Pages deploy), `validate.yml` (static validation), `proof-tests.yml` (evidence collector) | `.github/workflows/` | Concurrency control, JMeter caching, secret-only credentials, rich step summaries, live report at Pages URL |
 | 17 | AI Self-Healing | 4-layer agent: alias map (16 names) + JWT detection + heuristic pattern + LLM fallback; circuit breaker, correlation guardian for all 7 variables, response fingerprinting, statistics reporter | setUp > `CONCEPT 17` | `scripts/groovy/self_heal_token.groovy` + `correlation_guardian.groovy` + `self_heal_stats.groovy`; provable with `run/proof-self-heal.ps1` |
 
@@ -396,7 +398,7 @@ These checks were completed **without contacting any server**.
 
 | Check | Method | Result |
 |---|---|---|
-| JMX parses as valid XML | `xml.etree.ElementTree.parse()` | 1,368 lines, well-formed |
+| JMX parses as valid XML | `xml.etree.ElementTree.parse()` | 1,566 lines, well-formed |
 | All 17 concepts labelled | `scripts/validate_repo.py` — concept scanner | 15/17 in JMX + 2 external |
 | Dual numbering correct | automated cross-reference check | All guide/deck pairs match |
 | 49 properties externalized | `__P()` extraction + property file cross-ref | Zero hardcoded operational values |
@@ -496,23 +498,68 @@ complete list, verifiable with: `grep -oP '__P\(\K[^,)]+' tests/azm_sba_perf.jmx
 > graded run. The framework, SLA thresholds, and automation are ready — only the
 > authorized load window against the real target is needed.
 
-### 11.0 Mock server validation (pre-target proof)
+### 11.0 Framework verification against the local mock
 
-The script was executed end-to-end against `mock/mock_api.py` (localhost only, no
-external traffic) to prove the framework functions correctly before touching the
-real target.
+The script was executed end-to-end against `mock/mock_api.py` (loopback only, no
+external traffic) to prove the framework functions before anyone points it at a
+shared environment. Full output is committed under
+[`docs/evidence/`](../docs/evidence/EVIDENCE.md).
 
-| Run | VUs | Samples | Labels | Framework Errors | Notes |
-|---|---|---|---|---|---|
-| Smoke (mock) | 2 | 305 | 16 clean | 0 | Full flow: login -> browse -> cart -> checkout -> order |
-| Self-heal proof | 1 | 43 | — | 0 | Token field renamed; 3 heal events, 0 failures |
-| Retry proof | 1 | — | — | 0 | `RETRY RECOVERED ... succeeded on attempt 2`, cap enforced |
-| Distributed proof | 51 | 5,101 | 17 | 0 | 1 worker on localhost, all panels populated in Grafana |
+**These are not performance findings.** The mock's latencies are injected
+constants, so no conclusion about the application's speed can be drawn from
+them. What they establish is that the plan executes: captures feed later
+requests, assertions fire on body content, retry recovers, self-healing rebinds.
 
-**Mock bottleneck observation:** TX-03 Deep Dive was consistently the slowest
-transaction (p95 = 2,344 ms vs TX-01 Browse p95 = 363 ms), confirming the
-checkout/enrollment path is the saturation point — as expected for a write-heavy
-flow with HMAC signature computation and DB validation.
+| Run | VUs | Samples | Errors | What it establishes |
+|---|---|---|---|---|
+| Framework verification | 5 | 312 | 8 (2.56%) | Full chain executes; all 21 labels populated |
+| Self-heal proof | 3 | 14 | 0 (0.00%) | Token field renamed, run still green; 3 heals, circuit breaker engaged |
+
+**The 8 errors are the point, not a defect.** All eight are the certificates
+call returning **HTTP 200 with `{"status":"declined"}`** — the mock injects this
+on 12% of requests deliberately. A status-code check passes it; only the body
+assertion catches it, and it did. The same endpoint inside TX-03 (`S07`, wrapped
+in the retry loop) recorded **0 errors across 15 samples**, because the retry
+absorbed the identical injected failures. Together these demonstrate the brief's
+"200 is not success" pitfall and the retry, rather than asserting them.
+
+**Chain verified in execution order**, on every thread, from the JTL:
+
+```
+S01c Categories      200  -> captures categorySlug
+S01d Course Catalog  200  -> GET ?category=${categorySlug}, captures catalogCourseSlug
+S01e Course Detail   200  -> GET /courses/${catalogCourseSlug}/, asserts $.slug matches
+```
+
+#### Two defects this verification exposed
+
+Both were real scripting bugs that would have corrupted a graded run:
+
+1. **The catalog journey was not a journey.** Categories, search and detail sat
+   as three independent children of the Random Controller, which selects one
+   child per iteration. The detail call therefore ran on iterations where the
+   search that produces its input never did, requesting `/courses/NO_SLUG/`.
+   Fixed by wrapping the three in a Simple Controller so the Random Controller
+   treats the journey as one indivisible option.
+
+2. **An unset variable is not an empty string.** Where an extractor had not run,
+   JMeter substituted the literal text `${catalogCourseSlug}` into the URL. The
+   braces are illegal in a URI, so the sampler died with `URISyntaxException`
+   before issuing a request — a transport error masquerading as a target
+   problem. Fixed by seeding every correlated variable with a sentinel default.
+
+The error rate across these fixes went 27.4% -> 4.7% -> 2.56%, with the residual
+being only the deliberate injection described above.
+
+#### The mock had drifted out of contract
+
+Earlier mock runs reported a ~90% error rate. The cause was not the script: the
+mock still served an older Open edX shape (`/api/courses/v1/...`) while the plan
+had moved to the SBA contract (`/api/catalog/...`), so essentially every request
+404'd. A 404 is a valid HTTP response, so nothing in the pipeline flagged it and
+the resulting numbers were meaningless. The mock was rewritten against the
+current contract, and `scripts/check_mock_parity.py` now fails loudly if the two
+sides diverge again.
 
 ### 11.1 Baseline — 30 VUs, 60s ramp, 10 min hold
 
@@ -558,21 +605,27 @@ Verdict: **PENDING** — run `.\run\spike.ps1`, then `python scripts\check_sla.p
 
 > Percentiles only — averages are explicitly a listed pitfall.
 
-### Pre-target observation (mock server, 2 VUs)
+### What the mock run can and cannot tell us
 
-Even against the mock (which adds artificial delays to simulate real behaviour),
-TX-03 Deep Dive is clearly the bottleneck:
+From the verification run (5 VUs, 312 samples):
 
-| Transaction | Mock p95 | Mock p99 | Relative |
+| Transaction | p90 | p95 | Avg |
 |---|---|---|---|
-| TX-01 Browse | 363 ms | 367 ms | 1.0x |
-| TX-02 Explore | 747 ms | 979 ms | 2.1x |
-| TX-03 Deep Dive | 2,344 ms | 2,888 ms | **6.5x** |
+| TX-01 Browse | 332 ms | 338 ms | 382 ms |
+| TX-02 Explore | 314 ms | 334 ms | 143 ms |
+| TX-03 Deep Dive | 546 ms | 3,614 ms | 588 ms |
 
-The checkout/enrollment path (TX-03) chains: HMAC signature computation (JSR223) ->
-checkout request -> retry loop (if needed) -> JDBC validation -> order verification.
-Each added step compounds latency. Under real load, this is where saturation will
-appear first.
+TX-03 is the slowest branch, which is unsurprising: it chains HMAC signature
+computation -> signed certificate request -> retry loop -> enrollment
+verification, and each step compounds.
+
+**This is not a bottleneck finding.** The mock's latencies are constants set in
+`mock/mock_api.py` (`CHECKOUT_LATENCY_MS=220`), so TX-03 is slower here because
+it was *configured* to be. The numbers confirm the per-transaction breakdown is
+wired up and reports distinct values per branch — nothing more. Naming a
+bottleneck from injected constants would be a fabricated finding.
+
+The real bottleneck analysis is filled in below, after the graded runs.
 
 ### Live target analysis (fill after graded runs)
 

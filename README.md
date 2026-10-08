@@ -68,7 +68,8 @@ Results go to `results/<level>-<timestamp>/` with `.jtl`, HTML report, and SLA v
 │   ├── validate_repo.py                   # 15-check static validator
 │   ├── check_sla.py                       # SLA checker with bottleneck ID
 │   ├── compare_runs.py                    # Run-over-run regression detector
-│   └── partition_csv.py                   # CSV splitter for distributed workers
+│   ├── partition_csv.py                   # CSV splitter for distributed workers
+│   └── check_mock_parity.py               # Fails if the mock stops serving a path the plan calls
 ├── ci/
 │   ├── secret_scan.py                     # Credential leak prevention
 │   ├── sla_gate.py                        # CI SLA gate with JSON output
@@ -94,7 +95,8 @@ Results go to `results/<level>-<timestamp>/` with `.jtl`, HTML report, and SLA v
 ├── report/
 │   └── concept-mapping.md                 # Full submission report
 └── docs/
-    └── screenshots/                       # Grafana dashboard screenshots
+    ├── screenshots/                       # Grafana dashboard screenshots
+    └── evidence/                          # Committed run output (HTML report, self-heal log)
 ```
 
 ---
