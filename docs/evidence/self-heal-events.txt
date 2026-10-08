@@ -1,0 +1,4 @@
+2026-10-08 11:09:56  [local@PF5VPV1E]  HEALED  layer=alias_map  field='token'  sampler='S00 Login (CSV credentials)'  thread='setUp — Login once per VU and correlate token'
+2026-10-08 11:09:57  [local@PF5VPV1E]  HEALED  layer=alias_map  field='token'  sampler='S00b Re-login (fallback)'  thread='Main — SBA Academy weighted mix'
+2026-10-08 11:09:58  [local@PF5VPV1E]  CIRCUIT-BREAKER  cached_field='token'  after=3 heals
+2026-10-08 11:09:58  [local@PF5VPV1E]  HEALED  layer=alias_map  field='token'  sampler='S00b Re-login (fallback)'  thread='Main — SBA Academy weighted mix'

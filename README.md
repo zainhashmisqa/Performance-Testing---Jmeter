@@ -28,7 +28,11 @@ cd monitoring; docker compose up -d; cd ..
 # 4. Validation
 python scripts\validate_repo.py
 python ci\secret_scan.py
+python scripts\check_mock_parity.py   # mock answers every path the plan calls
 ```
+
+Execution evidence from the local mock (chaining, retry, self-healing, per-label
+percentiles) is committed under [`docs/evidence/`](docs/evidence/EVIDENCE.md).
 
 Results go to `results/<level>-<timestamp>/` with `.jtl`, HTML report, and SLA verdict.
 

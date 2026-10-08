@@ -1,0 +1,10 @@
+{
+    "run_timestamp": "2026-10-08 11:10:36",
+    "total_heals": 3,
+    "layers_hit": {
+        "alias_map": 3,
+        "circuit_breaker_field": "token",
+        "last_response_structure": "email,id,status,token,user.email,user.id,user.username,username"
+    },
+    "verdict": "SELF-HEALING ACTIVE \u2014 3 field(s) recovered"
+}
